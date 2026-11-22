@@ -45,6 +45,9 @@ jobs:
       - name: Flutter doctor
         run: flutter doctor -v
 
+      - name: Show pubspec.yaml
+        run: cat pubspec.yaml
+
       - name: Install dependencies
         run: flutter pub get --verbose
 
