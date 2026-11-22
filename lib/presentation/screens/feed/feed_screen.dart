@@ -24,6 +24,8 @@ class _FeedScreenState extends State<FeedScreen> {
   final ScrollController _scrollController = ScrollController();
   List<Map<String, dynamic>> _posts = [];
   List<_StoryUser> _storyUsers = [];
+  _StoryUser? _ownStoryUser;
+  final Set<String> _savedPostIds = {};
   bool _isLoadingPosts = false;
   bool _isLoadingStories = true;
   bool _hasMorePosts = true;
@@ -35,6 +37,7 @@ class _FeedScreenState extends State<FeedScreen> {
     super.initState();
     _loadStories();
     _loadPosts();
+    _loadSavedPosts();
     _scrollController.addListener(_onScroll);
   }
 
@@ -46,11 +49,21 @@ class _FeedScreenState extends State<FeedScreen> {
 
   Future<void> _loadStories() async {
     try {
-      // Get stories from followed users + current user
+      // Stories from followed users + current user (Instagram parity)
       final currentUserId = SupabaseService().currentUser?.id;
       if (currentUserId == null) return;
 
-      // For now, get recent stories from all users (in production, filter by follows)
+      final followsResponse = await SupabaseService().client
+          .from(RippleConstants.tableFollows)
+          .select('following_id')
+          .eq('follower_id', currentUserId);
+
+      final followedIds = (followsResponse as List)
+          .map((row) => row['following_id'] as String?)
+          .whereType<String>()
+          .toSet();
+      followedIds.add(currentUserId);
+
       final response = await SupabaseService().client
           .from(RippleConstants.tableStories)
           .select('''
@@ -61,11 +74,18 @@ class _FeedScreenState extends State<FeedScreen> {
           .order('created_at', ascending: false)
           .limit(50);
 
+      final filtered = (response as List)
+          .where((story) => followedIds.contains(story['user_id']))
+          .toList();
+
       if (mounted) {
+        final storyUsers = _groupStoriesByUser(
+          List<Map<String, dynamic>>.from(filtered),
+        );
+        final own = storyUsers.where((u) => u.userId == currentUserId).toList();
+        _ownStoryUser = own.isNotEmpty ? own.first : null;
+        _storyUsers = storyUsers.where((u) => u.userId != currentUserId).toList();
         setState(() {
-          _storyUsers = _groupStoriesByUser(
-            List<Map<String, dynamic>>.from(response),
-          );
           _isLoadingStories = false;
         });
       }
@@ -197,28 +217,71 @@ class _FeedScreenState extends State<FeedScreen> {
     }, actionName: 'like');
   }
 
+  Future<void> _loadSavedPosts() async {
+    final userId = SupabaseService().currentUser?.id;
+    if (userId == null) return;
+
+    try {
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableSavedPosts)
+          .select('post_id')
+          .eq('user_id', userId);
+
+      if (mounted) {
+        setState(() {
+          _savedPostIds.addAll(
+            (response as List)
+                .map((row) => row['post_id'] as String?)
+                .whereType<String>(),
+          );
+        });
+      }
+    } catch (e) {
+      // Saved-posts state is best effort; the UI keeps working
+    }
+  }
+
   void _onSavePost(String postId) {
     AuthGuard.run(context, onAuthenticated: () async {
+      final userId = SupabaseService().currentUser?.id;
+      if (userId == null) return;
+
+      final isSaved = _savedPostIds.contains(postId);
       try {
-        await SupabaseService().client.from(RippleConstants.tableSavedPosts).upsert({
-          'user_id': SupabaseService().currentUser!.id,
-          'post_id': postId,
-          'created_at': DateTime.now().toIso8601String(),
-        });
+        if (isSaved) {
+          await SupabaseService().client
+              .from(RippleConstants.tableSavedPosts)
+              .delete()
+              .eq('user_id', userId)
+              .eq('post_id', postId);
+        } else {
+          await SupabaseService().client.from(RippleConstants.tableSavedPosts).upsert({
+            'user_id': userId,
+            'post_id': postId,
+            'created_at': DateTime.now().toIso8601String(),
+          });
+        }
         if (mounted) {
+          setState(() {
+            if (isSaved) {
+              _savedPostIds.remove(postId);
+            } else {
+              _savedPostIds.add(postId);
+            }
+          });
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Post saved'),
+            SnackBar(
+              content: Text(isSaved ? 'Post unsaved' : 'Post saved'),
               behavior: SnackBarBehavior.floating,
-              duration: Duration(seconds: 2),
+              duration: const Duration(seconds: 2),
             ),
           );
         }
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Failed to save post'),
+            const SnackBar(
+              content: Text('Failed to update saved post'),
               backgroundColor: RippleColors.error,
               behavior: SnackBarBehavior.floating,
             ),
@@ -329,6 +392,7 @@ class _FeedScreenState extends State<FeedScreen> {
                         }
                         return PostCard(
                           post: _posts[index],
+                          isSaved: _savedPostIds.contains(_posts[index]['id'] as String?),
                           onLike: _onLikePost,
                           onSave: _onSavePost,
                           onShare: _onSharePost,
@@ -400,9 +464,22 @@ class _FeedScreenState extends State<FeedScreen> {
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        itemCount: _storyUsers.length + 1, // +1 for "Add Story"
+        itemCount: _storyUsers.length + 1, // +1 for own ring (add button or own story)
         itemBuilder: (context, index) {
           if (index == 0) {
+            // Own ring: show the real own-story ring when you have stories,
+            // otherwise the add-story button (Instagram parity).
+            if (_ownStoryUser != null) {
+              final ownProfile = _ownStoryUser!.profile;
+              return StoryRing(
+                username: ownProfile?['username'] ?? 'Your Story',
+                displayName: ownProfile?['display_name'] ?? 'You',
+                avatarUrl: ownProfile?['avatar_url'],
+                hasStory: true,
+                isOwnStory: true,
+                onTap: () => _openStoryViewer(_ownStoryUser!),
+              );
+            }
             return _buildAddStoryButton();
           }
           final storyUser = _storyUsers[index - 1];

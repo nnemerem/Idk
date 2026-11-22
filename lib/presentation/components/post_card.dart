@@ -15,6 +15,7 @@ typedef TapCallback = void Function();
 
 class PostCard extends StatelessWidget {
   final Map<String, dynamic> post;
+  final bool isSaved;
   final LikeCallback onLike;
   final SaveCallback onSave;
   final ShareCallback onShare;
@@ -23,6 +24,7 @@ class PostCard extends StatelessWidget {
   const PostCard({
     super.key,
     required this.post,
+    this.isSaved = false,
     required this.onLike,
     required this.onSave,
     required this.onShare,
@@ -394,9 +396,12 @@ class PostCard extends StatelessWidget {
           // Save
           IconButton(
             icon: SvgPicture.asset(
-              'assets/icons/bookmark.svg',
+              isSaved ? 'assets/icons/bookmark_filled.svg' : 'assets/icons/bookmark.svg',
               width: 28,
               height: 28,
+              colorFilter: isSaved
+                  ? const ColorFilter.mode(Colors.white, BlendMode.srcIn)
+                  : null,
             ),
             onPressed: () => onSave(post['id'] as String),
             padding: EdgeInsets.zero,
