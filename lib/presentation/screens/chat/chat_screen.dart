@@ -84,6 +84,7 @@ class _ChatScreenState extends State<ChatScreen> {
           _isLoading = false;
         });
         _scrollToBottom();
+        _markIncomingAsRead();
       }
     } catch (e) {
       if (mounted) {
@@ -103,8 +104,31 @@ class _ChatScreenState extends State<ChatScreen> {
           _messages = data;
         });
         _scrollToBottom();
+        _markIncomingAsRead();
       }
     });
+  }
+
+  void _markIncomingAsRead() {
+    final currentUserId = SupabaseService().currentUser?.id;
+    if (currentUserId == null) return;
+
+    final unreadIds = _messages
+        .where((m) => m['sender_id'] != currentUserId && m['is_read'] != true)
+        .map((m) => m['id'] as String?)
+        .whereType<String>()
+        .toList();
+
+    if (unreadIds.isEmpty) return;
+
+    for (final id in unreadIds) {
+      SupabaseService().client
+          .from(RippleConstants.tableMessages)
+          .update({'is_read': true})
+          .eq('id', id)
+          .then((_) {})
+          .catchError((_) {});
+    }
   }
 
   void _scrollToBottom() {
@@ -443,6 +467,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 child: TextField(
                   controller: _messageController,
+                  onChanged: (_) => setState(() {}),
                   style: const TextStyle(color: RippleColors.textPrimary),
                   decoration: InputDecoration(
                     hintText: 'Message...',
