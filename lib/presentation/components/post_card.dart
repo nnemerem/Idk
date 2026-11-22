@@ -246,6 +246,11 @@ class PostCard extends StatelessWidget {
 
     return GestureDetector(
       onTap: onTap,
+      onDoubleTap: () {
+        // Instagram parity: double-tap on media likes the post.
+        final liked = _getIsLiked();
+        if (!liked) onLike(post['id'] as String, false);
+      },
       child: Stack(
         fit: StackFit.passthrough,
         children: [
@@ -317,6 +322,10 @@ class PostCard extends StatelessWidget {
 
           return GestureDetector(
             onTap: onTap,
+            onDoubleTap: () {
+              final liked = _getIsLiked();
+              if (!liked) onLike(post['id'] as String, false);
+            },
             child: isVideo
                 ? _VideoPlayerWidget(videoUrl: mediaUrl)
                 : CachedNetworkImage(
