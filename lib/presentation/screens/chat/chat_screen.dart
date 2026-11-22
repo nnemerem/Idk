@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:image_picker/image_picker.dart';
@@ -22,6 +24,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final ImagePicker _picker = ImagePicker();
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _messageController = TextEditingController();
+  StreamSubscription<List<Map<String, dynamic>>>? _messagesSubscription;
   List<Map<String, dynamic>> _messages = [];
   Map<String, dynamic>? _conversation;
   Map<String, dynamic>? _otherParticipant;
@@ -37,6 +40,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _messagesSubscription?.cancel();
     _scrollController.dispose();
     _messageController.dispose();
     super.dispose();
@@ -94,18 +98,32 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _subscribeToMessages() {
-    SupabaseService().client
+    _messagesSubscription = SupabaseService().client
         .from(RippleConstants.tableMessages)
         .stream(primaryKey: ['id'])
         .eq('conversation_id', widget.conversationId)
         .listen((data) {
-      if (mounted) {
-        setState(() {
-          _messages = data;
+      if (!mounted) return;
+      setState(() {
+        // Merge by id: stream events may carry changed rows only, so
+        // replacing the list would drop history.
+        final incoming = List<Map<String, dynamic>>.from(data);
+        for (final msg in incoming) {
+          final idx = _messages.indexWhere((m) => m['id'] == msg['id']);
+          if (idx == -1) {
+            _messages.add(msg);
+          } else {
+            _messages[idx] = msg;
+          }
+        }
+        _messages.sort((a, b) {
+          final ac = a['created_at'] as String? ?? '';
+          final bc = b['created_at'] as String? ?? '';
+          return ac.compareTo(bc);
         });
-        _scrollToBottom();
-        _markIncomingAsRead();
-      }
+      });
+      _scrollToBottom();
+      _markIncomingAsRead();
     });
   }
 

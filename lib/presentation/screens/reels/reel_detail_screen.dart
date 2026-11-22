@@ -27,6 +27,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
   bool _isLoading = true;
   bool _isLoadingComments = false;
   final TextEditingController _commentController = TextEditingController();
+  final FocusNode _commentFocusNode = FocusNode();
   late VideoPlayerController _controller;
   bool _isInitialized = false;
   bool _isPlaying = true;
@@ -40,6 +41,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
 
   @override
   void dispose() {
+    _commentFocusNode.dispose();
     _commentController.dispose();
     _controller.dispose();
     super.dispose();
@@ -434,9 +436,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                   _ActionButton(
                     iconAsset: 'assets/icons/comment.svg',
                     label: _formatCount(commentsCount),
-                    onTap: () {
-                      // Comments are already visible in the sheet below
-                    },
+                    onTap: _focusCommentInput,
                   ),
                   const SizedBox(height: 24),
                   _ActionButton(
@@ -717,6 +717,10 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
     );
   }
 
+  void _focusCommentInput() {
+    _commentFocusNode.requestFocus();
+  }
+
   Widget _buildCommentInput() {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
@@ -733,6 +737,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
           Expanded(
             child: TextField(
               controller: _commentController,
+              focusNode: _commentFocusNode,
               style: const TextStyle(color: Colors.white),
               decoration: InputDecoration(
                 hintText: 'Add a comment...',
