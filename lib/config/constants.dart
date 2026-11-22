@@ -2,7 +2,7 @@ class RippleConstants {
   // App info
   static const String appName = 'Ripple';
   static const String appVersion = '1.0.0';
-  static const String appBundleId = 'com.ripple.app';
+  static const String appBundleId = 'com.n.o_group.ripple';
 
   // Supabase (injected at build time via --dart-define)
   // Using static getters with String.fromEnvironment for dart-define support
