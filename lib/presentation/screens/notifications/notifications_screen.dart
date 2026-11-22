@@ -86,6 +86,83 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   int get _unreadCount =>
       _notifications.where((n) => n['is_read'] != true).length;
 
+  /// Navigate to the content this notification refers to.
+  void _openNotification(Map<String, dynamic> notification) {
+    final type = notification['type'] as String?;
+    final data = notification['data'] is Map
+        ? Map<String, dynamic>.from(notification['data'] as Map)
+        : <String, dynamic>{};
+
+    // Best-effort single-row read update (instant + reload-safe)
+    final userId = SupabaseService().currentUser?.id;
+    final id = notification['id'] as String?;
+    if (userId != null && id != null && notification['is_read'] != true) {
+      _markOneRead(id, userId);
+    }
+
+    if (type == 'post_like' || type == 'post_comment') {
+      final postId = data['post_id'] as String?;
+      if (postId != null && postId.isNotEmpty) {
+        context.go('${RippleConstants.routeFeed}/post/$postId');
+        return;
+      }
+    } else if (type == 'reel_like' || type == 'reel_comment') {
+      final reelId = data['reel_id'] as String?;
+      if (reelId != null && reelId.isNotEmpty) {
+        context.go('${RippleConstants.routeReels}/reel/$reelId');
+        return;
+      }
+    } else if (type == 'follow' || type == 'mention' || type == 'tag') {
+      final username = data['target_username'] as String?;
+      if (username != null && username.isNotEmpty) {
+        context.go('/user/$username');
+        return;
+      }
+      final actorId = data['actor_id'] as String?;
+      if (actorId != null && actorId.isNotEmpty) {
+        _goToActorProfile(actorId);
+        return;
+      }
+    }
+
+    // Fallback: no destination — just leave (notification already marked read)
+  }
+
+  Future<void> _markOneRead(String id, String userId) async {
+    try {
+      await SupabaseService()
+          .client
+          .from(RippleConstants.tableNotifications)
+          .update({'is_read': true})
+          .eq('id', id)
+          .eq('user_id', userId);
+      _refreshNotificationReadState(id);
+    } catch (_) {
+      // Best effort
+    }
+  }
+
+  void _refreshNotificationReadState(String id) {
+    if (!mounted) return;
+    setState(() {
+      for (final n in _notifications) {
+        if (n['id'] == id) n['is_read'] = true;
+      }
+    });
+  }
+
+  Future<void> _goToActorProfile(String actorId) async {
+    try {
+      final profile = await SupabaseService().getProfile(actorId);
+      final username = profile?['username'] as String?;
+      if (mounted && username != null && username.isNotEmpty) {
+        context.go('/user/$username');
+      }
+    } catch (_) {
+      // Best effort
+    }
+  }
+
   Future<void> _onRefresh() async {
     await _loadNotifications(markRead: true);
   }
@@ -205,18 +282,21 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     final isRead = notification['is_read'] == true;
     final createdAt = notification['created_at'] as String?;
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: isRead ? RippleColors.surface : RippleColors.surfaceVariant,
-        borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
-        border: Border.all(
-          color: RippleColors.divider,
-          width: 0.5,
+    return GestureDetector(
+      onTap: () => _openNotification(notification),
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: isRead ? RippleColors.surface : RippleColors.surfaceVariant,
+          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
+          border: Border.all(
+            color: RippleColors.divider,
+            width: 0.5,
+          ),
         ),
-      ),
-      child: Row(
+        child: Row(
         children: [
           Container(
             width: 40,
@@ -279,6 +359,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
               ),
             ),
         ],
+        ),
       ),
     );
   }

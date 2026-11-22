@@ -115,7 +115,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
 
     try {
       final response = await SupabaseService().client
-          .from(RippleConstants.tableComments)
+          .from(RippleConstants.tableReelComments)
           .select('''
             *,
             profiles:user_id (id, username, display_name, avatar_url)
@@ -157,7 +157,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
     AuthGuard.run(context, onAuthenticated: () async {
       try {
         final currentUserId = SupabaseService().currentUser!.id;
-        await SupabaseService().client.from(RippleConstants.tableComments).insert({
+        await SupabaseService().client.from(RippleConstants.tableReelComments).insert({
           'reel_id': widget.reelId,
           'user_id': currentUserId,
           'content': content,

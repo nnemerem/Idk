@@ -797,17 +797,15 @@ class _UserProfileScreenState extends State<UserProfileScreen>
             ListTile(
               leading: SvgPicture.asset('assets/icons/flag.svg', width: 24, height: 24),
               title: const Text('Report'),
-              onTap: () => Navigator.pop(context),
-            ),
-            ListTile(
-              leading: SvgPicture.asset('assets/icons/block.svg', width: 24, height: 24),
-              title: const Text('Block'),
-              onTap: () => Navigator.pop(context),
-            ),
-            ListTile(
-              leading: SvgPicture.asset('assets/icons/visibility_off.svg', width: 24, height: 24),
-              title: const Text('Hide'),
-              onTap: () => Navigator.pop(context),
+              onTap: () {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Thanks — our team reviews reports'),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              },
             ),
           ],
         ),

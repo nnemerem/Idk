@@ -97,7 +97,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
 
     try {
       final response = await SupabaseService().client
-          .from(RippleConstants.tableComments)
+          .from(RippleConstants.tablePostComments)
           .select('''
             *,
             profiles:user_id (id, username, display_name, avatar_url)
@@ -125,7 +125,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     AuthGuard.run(context, onAuthenticated: () async {
       try {
         final currentUserId = SupabaseService().currentUser!.id;
-        await SupabaseService().client.from(RippleConstants.tableComments).insert({
+        await SupabaseService().client.from(RippleConstants.tablePostComments).insert({
           'post_id': widget.postId,
           'user_id': currentUserId,
           'content': content,

@@ -50,8 +50,8 @@ class RippleConstants {
   static const String tableReels = 'reels';
   static const String tableStories = 'stories';
   static const String tableFollows = 'follows';
-  static const String tableLikes = 'likes';
-  static const String tableComments = 'comments';
+  static const String tablePostComments = 'post_comments';
+  static const String tableReelComments = 'reel_comments';
   static const String tableMessages = 'messages';
   static const String tableConversations = 'conversations';
   static const String tableConversationParticipants = 'conversation_participants';

@@ -731,14 +731,12 @@ class _ProfileScreenState extends State<ProfileScreen>
                 },
               ),
             ListTile(
-              leading: SvgPicture.asset('assets/icons/help.svg', width: 24, height: 24),
-              title: const Text('Help'),
-              onTap: () => Navigator.pop(context),
-            ),
-            ListTile(
               leading: SvgPicture.asset('assets/icons/info.svg', width: 24, height: 24),
               title: const Text('About'),
-              onTap: () => Navigator.pop(context),
+              onTap: () {
+                Navigator.pop(context);
+                _showAboutDialog();
+              },
             ),
             const Divider(color: RippleColors.divider),
             if (!isGuest)
@@ -763,6 +761,29 @@ class _ProfileScreenState extends State<ProfileScreen>
               ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _showAboutDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: RippleColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
+        ),
+        title: const Text('About Ripple'),
+        content: Text(
+          'Ripple v${RippleConstants.appVersion}\n\nYour visual social world.\n\n'
+          'Posts, Reels, Stories, and DMs in one place.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
       ),
     );
   }
