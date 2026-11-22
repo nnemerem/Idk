@@ -177,9 +177,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
 
   void _onShare() {
     AuthGuard.run(context, onAuthenticated: () {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Share feature coming soon'), behavior: SnackBarBehavior.floating),
-      );
+      _shareOrCopy();
     }, actionName: 'share');
   }
 
