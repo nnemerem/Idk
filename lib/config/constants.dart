@@ -5,8 +5,22 @@ class RippleConstants {
   static const String appBundleId = 'com.ripple.app';
 
   // Supabase (injected at build time via supabase_config.dart)
-  static const String supabaseUrl = SupabaseConfig.supabaseUrl;
-  static const String supabaseAnonKey = SupabaseConfig.supabaseAnonKey;
+  // Using late static getters to handle missing config gracefully
+  static String get supabaseUrl {
+    try {
+      return SupabaseConfig.supabaseUrl;
+    } catch (_) {
+      return 'https://your-project.supabase.co'; // fallback for local dev without config
+    }
+  }
+
+  static String get supabaseAnonKey {
+    try {
+      return SupabaseConfig.supabaseAnonKey;
+    } catch (_) {
+      return 'your-anon-key-here'; // fallback for local dev without config
+    }
+  }
 
   // Route names
   static const String routeSplash = '/splash';
