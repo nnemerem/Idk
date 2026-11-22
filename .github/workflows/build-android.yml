@@ -63,6 +63,13 @@ jobs:
           echo "EXIT_CODE=${PIPESTATUS[0]}" >> pub_get_output.txt
         shell: bash
 
+      - name: Show pub get output (for debugging)
+        if: always()
+        run: |
+          echo "=== PUB GET OUTPUT ==="
+          cat pub_get_output.txt
+          echo "=== END OUTPUT ==="
+
       - name: Upload pub get logs (debug)
         if: always()
         uses: actions/upload-artifact@v4
