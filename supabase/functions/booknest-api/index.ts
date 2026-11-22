@@ -1,0 +1,6345 @@
+// ============================================================================
+// BookNest gateway API — supabase/functions/booknest-api
+// ============================================================================
+// ARCHITECTURE (see docs/MONGO_SCHEMA.md + BACKEND_DATA_ARCHITECTURE_PROMPT.md):
+//   Supabase  → authentication ONLY + this orchestration layer. It "leads".
+//   MongoDB   → the heavy lifting: books, chapters, likes, saves, views,
+//               reviews, follows, chats, notifications, counters.
+//   Cloudinary→ images (covers/avatars/feed/chat) — stored as URL strings here.
+//   Cloudflare R2 → heavy media (voice notes, videos, ≤300MB docs) — URLs only.
+//
+// SECRETS (set via backend/setup_secrets.sh — never in Flutter, never in Git):
+//   MONGO_URI, MONGO_DB_NAME, SUPABASE_SERVICE_ROLE_KEY, R2_*, CLOUDINARY_API_*
+//   SUPABASE_URL + SUPABASE_ANON_KEY are injected automatically per runtime.
+//
+// PITFALLS HONORED (per blueprint):
+//   ✗ No arrays of user IDs inside book documents → like/save/view/review
+//     identities live in their own collections behind unique compound indexes.
+//   ✗ No countDocuments() in scroll/list paths → all counters are denormalized
+//     and maintained with atomic $inc at write time.
+//   ✓ Unique indexes make every action idempotent and race-safe
+//     (double-taps can never double-count).
+// ============================================================================
+
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { MongoClient, ObjectId } from 'npm:mongodb@6.7.0';
+
+const MONGO_URI = Deno.env.get('MONGO_URI') ?? '';
+const MONGO_DB_NAME = Deno.env.get('MONGO_DB_NAME') ?? 'booknest';
+
+const CORS: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+  'Access-Control-Allow-Headers':
+    'authorization, x-client-info, apikey, content-type',
+};
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...CORS },
+  });
+}
+const ok = (data: unknown) => json({ ok: true, data });
+const fail = (error: string, status = 400) => json({ ok: false, error }, status);
+
+// ---------------------------------------------------------------------------
+// MongoDB connection (cached across invocations — one client per cold start)
+// ---------------------------------------------------------------------------
+// One database per data domain inside the Atlas cluster — likes never mix
+// with chats, books never mix with reviews. A single shared client, a cached
+// handle per database.
+export const DB_NAMES = {
+  books: 'booknest_books', // books metadata + chapters (manuscripts)
+  social: 'booknest_social', // likes, saves, views, follows, follower counts
+  reviews: 'booknest_reviews', // reviews + comments
+  chats: 'booknest_chats', // conversations + messages
+  notifications: 'booknest_notifications',
+  users: 'booknest_users', // reader preferences
+  dictionary: 'booknest_dictionary', // Word Nest lookups + trending
+  feed: 'booknest_feed', // feed posts (cutover complete: was transitional SQL)
+  moderation: 'booknest_moderation', // UGC reports from the community
+  groups: 'booknest_groups', // clubs, communities, organizations, schools
+  genres: 'booknest_genres', // moderator-curated book + club genre shelves
+  payments: 'booknest_payments', // orders + paystack references (money ledger)
+} as const;
+
+type Domain = keyof typeof DB_NAMES;
+
+let mongoClientPromise: Promise<import('npm:mongodb@6.7.0').MongoClient> | null = null;
+const dbCache = new Map<Domain, Promise<import('npm:mongodb@6.7.0').Db>>();
+
+function mongoClient(): Promise<import('npm:mongodb@6.7.0').MongoClient> {
+  if (!mongoClientPromise) {
+    if (!MONGO_URI) {
+      return Promise.reject(
+        new Error('MONGO_URI secret is not set — see backend/DEPLOY_FROM_DASHBOARD.md'),
+      );
+    }
+    const client = new MongoClient(MONGO_URI, {
+      appName: 'booknest-edge',
+      serverSelectionTimeoutMS: 8000,
+    });
+    mongoClientPromise = client.connect();
+  }
+  return mongoClientPromise;
+}
+
+function dbFor(domain: Domain): Promise<import('npm:mongodb@6.7.0').Db> {
+  let cached = dbCache.get(domain);
+  if (!cached) {
+    cached = mongoClient().then((client) => {
+      const database = client.db(DB_NAMES[domain]);
+      void ensureIndexes(database, domain);
+      return database;
+    });
+    dbCache.set(domain, cached);
+  }
+  return cached;
+}
+
+// Idempotent per-database index bootstrap (safe to repeat on cold starts).
+async function ensureIndexes(
+  database: import('npm:mongodb@6.7.0').Db,
+  domain: Domain,
+): Promise<void> {
+  try {
+    switch (domain) {
+      case 'payments':
+        await Promise.all([
+          database.collection('orders').createIndex({ reference: 1 }, { unique: true }),
+          database.collection('orders').createIndex({ userId: 1, createdAt: -1 }),
+          database.collection('subscriptions').createIndex({ userId: 1 }, { unique: true }),
+        ]);
+        break;
+      case 'moderation':
+        await Promise.all([
+          database.collection('reports').createIndex({ reporterId: 1, createdAt: -1 }),
+          database.collection('reports').createIndex({ status: 1, createdAt: -1 }),
+          database.collection('blocks').createIndex({ userId: 1, blockedId: 1 }, { unique: true }),
+          database.collection('bans').createIndex({ userId: 1 }, { unique: true }),
+          database.collection('admin_log').createIndex({ createdAt: -1 }),
+        ]);
+        break;
+      case 'books':
+        await Promise.all([
+          database.collection('books').createIndex({ createdAt: -1 }),
+          database.collection('books').createIndex({ authorId: 1 }),
+          database.collection('books').createIndex({ genre: 1, createdAt: -1 }),
+          database.collection('chapters').createIndex(
+            { bookId: 1, chapterNumber: 1 },
+            { unique: true },
+          ),
+        ]);
+        break;
+      case 'social':
+        await Promise.all([
+          database.collection('book_likes').createIndex({ bookId: 1, userId: 1 }, { unique: true }),
+          database.collection('book_bookmarks').createIndex({ bookId: 1, userId: 1 }, { unique: true }),
+          database.collection('book_bookmarks').createIndex({ userId: 1, createdAt: -1 }),
+          database.collection('book_views').createIndex({ bookId: 1, userId: 1, day: 1 }, { unique: true }),
+          database.collection('follows').createIndex({ followerId: 1, followeeId: 1 }, { unique: true }),
+          database.collection('user_stats').createIndex({ userId: 1 }, { unique: true }),
+        ]);
+        break;
+      case 'reviews':
+        await Promise.all([
+          database.collection('reviews').createIndex({ bookId: 1, userId: 1 }, { unique: true }),
+          database.collection('reviews').createIndex({ bookId: 1, createdAt: -1 }),
+          database.collection('comments').createIndex({ bookId: 1, createdAt: -1 }),
+        ]);
+        break;
+      case 'chats':
+        await Promise.all([
+          database.collection('conversations').createIndex({ memberKey: 1 }, { unique: true }),
+          database.collection('conversations').createIndex({ memberIds: 1, updatedAt: -1 }),
+          database.collection('messages').createIndex({ conversationId: 1, _id: -1 }),
+        ]);
+        break;
+      case 'notifications':
+        await database.collection('notifications')
+          .createIndex({ userId: 1, createdAt: -1 });
+        break;
+      case 'users':
+        await Promise.all([
+          database.collection('user_prefs').createIndex({ userId: 1 }, { unique: true }),
+          database.collection('profile_extras').createIndex({ userId: 1 }, { unique: true }),
+          database.collection('dm_keys').createIndex({ userId: 1 }, { unique: true }),
+          database.collection('push_tokens').createIndex({ token: 1 }, { unique: true }),
+          database.collection('push_tokens').createIndex({ userId: 1 }),
+          database.collection('link_passes').createIndex({ passId: 1 }, { unique: true }),
+          database.collection('link_passes').createIndex({ userId: 1 }),
+        ]);
+        break;
+      case 'genres':
+        await database.collection('genres')
+          .createIndex({ kind: 1, nameLower: 1 }, { unique: true });
+        break;
+    }
+  } catch (error) {
+    console.error(`index bootstrap failed for ${domain}:`, error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Auth — verify the caller's Supabase JWT and resolve their user id.
+// (deployed with verify_jwt = false so anonymous READS work; every WRITE
+//  still requires a valid user below — enforced right here.)
+// ---------------------------------------------------------------------------
+// The overall owner and moderator of BookNest.
+const ADMIN_EMAILS = new Set(['n.ogroup@yahoo.com']);
+
+/** Resolves the signed-in user when they are the overall moderator. */
+async function adminUserId(req: Request): Promise<string | null> {
+  const token = (req.headers.get('Authorization') ?? '')
+    .replace(/^Bearer\s+/i, '')
+    .trim();
+  if (!token) return null;
+  try {
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_ANON_KEY')!,
+    );
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data.user) return null;
+    const email = (data.user.email ?? '').toLowerCase();
+    return ADMIN_EMAILS.has(email) ? data.user.id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a reader is currently suspended by the moderator. */
+async function isBanned(uid: string): Promise<boolean> {
+  try {
+    const ban = await (await dbFor('moderation')).collection('bans')
+      .findOne({ userId: uid, active: true });
+    if (!ban) return false;
+    // Temporary suspensions expire on their own.
+    if (ban.mode === 'suspend' && ban.until instanceof Date &&
+        ban.until.getTime() < Date.now()) {
+      await (await dbFor('moderation')).collection('bans').updateOne(
+        { userId: uid }, { $set: { active: false, expiredAt: new Date() } });
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The reader's active punishment, if any (for the in-app gate). */
+async function activePunishment(uid: string) {
+  try {
+    const ban = await (await dbFor('moderation')).collection('bans')
+      .findOne({ userId: uid, active: true });
+    if (!ban) return null;
+    if (ban.mode === 'suspend' && ban.until instanceof Date &&
+        ban.until.getTime() < Date.now()) {
+      return null;
+    }
+    return {
+      mode: String(ban.mode ?? 'ban'),
+      reason: String(ban.reason ?? ''),
+      until: ban.until ?? null,
+      at: ban.at ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Resolves the device holding a background-link pass (no Google push). */
+/** Fetches display names for reader ids from profiles. */
+async function namesForUsers(ids: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (ids.length === 0) return out;
+  try {
+    const { data } = await serviceClient().from('profiles')
+      .select('id, display_name, username').in('id', ids);
+    for (const row of data ?? []) {
+      out.set(String(row.id),
+        String(row.display_name || row.username || 'Reader'));
+    }
+  } catch { /* names are a courtesy */ }
+  return out;
+}
+
+async function userIdFromLinkPass(raw: unknown): Promise<string | null> {
+  const passId = String(raw ?? '').trim();
+  if (!/^[a-f0-9]{64}$/.test(passId)) return null;
+  try {
+    const pass = await (await dbFor('users')).collection('link_passes')
+      .findOne({ passId });
+    if (!pass || pass.revoked) return null;
+    if (new Date(String(pass.expiresAt)).getTime() < Date.now()) return null;
+    return String(pass.userId);
+  } catch {
+    return null;
+  }
+}
+
+/** Every admin power is accountable: this log is viewable in the console. */
+async function logAdmin(
+  uid: string, action: string, detail: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await (await dbFor('moderation')).collection('admin_log').insertOne({
+      adminId: uid, action, detail, createdAt: new Date(),
+    });
+  } catch {
+    // The log never blocks the action.
+  }
+}
+
+// ── dynamic genres: the moderator curates both shelves ─────────────────────
+const DEFAULT_BOOK_GENRES = [
+  'Romance', 'Science Fiction', 'Thriller & Suspense', 'Fantasy',
+  'Mystery & Crime', 'Horror', 'Historical Fiction', 'Literary Fiction',
+  'Westerns', 'Biographies & Memoirs', 'True Crime', 'Self-Help & Wellness',
+  'History & Politics', 'Young Adult (YA)', 'STEM',
+  'Humanities & Social Sciences', 'Languages & Linguistics',
+  'Finance & Economics', 'Professional Certification', 'Lexicons',
+  'Research & Citation Tools', 'Compendiums',
+];
+const DEFAULT_CLUB_GENRES = [
+  'Fiction', 'Non-Fiction', 'Sci-Fi', 'Classics', 'African Lit', 'Romance',
+  'Thriller', 'Poetry', 'Academic', 'WAEC Prep',
+];
+
+/** First moderator touch copies the defaults in, so a removal can stick. */
+async function ensureGenresMaterialized(): Promise<void> {
+  const col = (await dbFor('genres')).collection('genres');
+  if ((await col.countDocuments({})) > 0) return;
+  const t = Date.now();
+  await col.insertMany([
+    ...DEFAULT_BOOK_GENRES.map((name, i) => ({
+      kind: 'book', name, nameLower: name.toLowerCase(),
+      createdAt: new Date(t + i),
+    })),
+    ...DEFAULT_CLUB_GENRES.map((name, i) => ({
+      kind: 'club', name, nameLower: name.toLowerCase(),
+      createdAt: new Date(t + 1000 + i),
+    })),
+  ]);
+}
+
+// ── FCM push (HTTP v1 with a service account from the dashboard env) ───────
+let fcmTokenCache: { token: string, until: number } | null = null;
+
+function strToBytes(v: string): Uint8Array {
+  const out = new Uint8Array(v.length);
+  for (let i = 0; i < v.length; i++) out[i] = v.charCodeAt(i);
+  return out;
+}
+
+function bytesToB64Url(bytes: Uint8Array): string {
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function firebaseAccessToken(): Promise<string | null> {
+  if (fcmTokenCache && fcmTokenCache.until > Date.now()) {
+    return fcmTokenCache.token;
+  }
+  const raw = Deno.env.get('FIREBASE_SERVICE_ACCOUNT');
+  if (!raw) return null;
+  try {
+    const sa = JSON.parse(raw);
+    const iat = Math.floor(Date.now() / 1000);
+    const b64 = (o: unknown) =>
+      bytesToB64Url(new TextEncoder().encode(JSON.stringify(o)));
+    const input = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({
+      iss: sa.client_email,
+      scope: 'https://www.googleapis.com/auth/firebase.messaging',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat,
+      exp: iat + 3300,
+    })}`;
+    const pem = String(sa.private_key).replace(
+      /-----[^-]+-----/g, '').replace(/\s+/g, '');
+    let bin = '';
+    const bytes = strToBytes(atob(pem));
+    for (const b of bytes) bin += String.fromCharCode(b);
+    const key = await crypto.subtle.importKey(
+      'pkcs8',
+      bytes as unknown as ArrayBuffer,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+    const sig = await crypto.subtle.sign(
+      'RSASSA-PKCS1-v1_5',
+      key,
+      new TextEncoder().encode(input) as unknown as ArrayBuffer,
+    );
+    const jwt = `${input}.${bytesToB64Url(new Uint8Array(sig))}`;
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion: jwt,
+      }),
+    });
+    const data = await res.json();
+    const token = typeof data?.access_token === 'string'
+      ? data.access_token : null;
+    if (token) {
+      fcmTokenCache = { token, until: Date.now() + 45 * 60 * 1000 };
+    }
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+/** Sends an FCM push to every device of a reader (fire-and-forget). */
+async function sendPush(
+  userId: string, title: string, body: string,
+  data: Record<string, string> = {},
+): Promise<void> {
+  try {
+    const accessToken = await firebaseAccessToken();
+    if (!accessToken) return;
+    const col = (await dbFor('users')).collection('push_tokens');
+    const tokens = await col.find({ userId }).toArray();
+    if (tokens.length === 0) return;
+    await Promise.all(tokens.map(async (t) => {
+      try {
+        const res = await fetch(
+          'https://fcm.googleapis.com/v1/projects/' +
+          `${Deno.env.get('FIREBASE_PROJECT_ID') ?? ''}/messages:send`,
+          {
+            method: 'POST',
+            headers: {
+              'authorization': `Bearer ${accessToken}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              message: {
+                token: String(t.token),
+                notification: { title, body },
+                data,
+                android: { priority: 'HIGH' },
+              },
+            }),
+          },
+        );
+        if (res.status === 404 || res.status === 410) {
+          await col.deleteOne({ _id: t._id });
+        }
+      } catch { /* one device failing never blocks the rest */ }
+    }));
+  } catch { /* push is best-effort by design */ }
+}
+
+async function currentUserId(req: Request): Promise<string | null> {
+  const token = (req.headers.get('Authorization') ?? '')
+    .replace(/^Bearer\s+/i, '')
+    .trim();
+  if (!token) return null;
+  try {
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_ANON_KEY')!,
+    );
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data.user) return null;
+    return data.user.id;
+  } catch {
+    return null;
+  }
+}
+
+// Service-role Supabase client — RLS-exempt writes for the db.write action
+// (resilience path: only used when a direct client insert was refused by
+//  stale policies; ownership is force-bound to the verified caller below).
+function serviceClient() {
+  return createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+    { auth: { persistSession: false } },
+  );
+}
+
+const WRITABLE_TABLES = new Set([
+  'profiles', 'posts', 'clubs', 'club_members', 'communities',
+  'community_members', 'organizations', 'organization_members', 'schools',
+  'school_members', 'club_books', 'book_chapters', 'announcement_groups',
+]);
+const OWNER_COLUMN: Record<string, string> = {
+  posts: 'created_by', clubs: 'owner_id', communities: 'owner_id',
+  organizations: 'owner_id', schools: 'owner_id', club_books: 'added_by',
+  club_members: 'user_id', community_members: 'user_id',
+  organization_members: 'user_id', school_members: 'user_id', profiles: 'id',
+};
+
+// ---------------------------------------------------------------------------
+// Legacy SQL → MongoDB cutover migration (one-time, idempotent, preserving ids)
+// ---------------------------------------------------------------------------
+const GROUP_KINDS = ['clubs', 'communities', 'organizations', 'schools'] as const;
+
+let migrationMemo = false;
+
+/** Real public-domain classics for brand-new shelves (first paragraphs,
+ * quoted faithfully). Ids are `seed-` prefixed so moderators can manage
+ * them exactly like any other book. */
+const SEED_BOOKS: Array<Record<string, string>> = [
+  {
+    id: 'seed-alice', title: "Alice's Adventures in Wonderland",
+    author: 'Lewis Carroll', genre: "Children's",
+    description: 'A curious girl tumbles down a rabbit hole into a world of talking animals, mad tea parties and a queen who loves beheadings — the founding classic of literary nonsense.',
+    chapterTitle: 'Down the Rabbit-Hole',
+    opening: 'Alice was beginning to get very tired of sitting by her sister on the bank, and of having nothing to do: once or twice she had peeped into the book her sister was reading, but it had no pictures or conversations in it, "and what is the use of a book," thought Alice, "without pictures or conversations?"\n\nSo she was considering in her own mind (as well as she could, for the hot day made her feel very sleepy and stupid), whether the pleasure of making a daisy-chain would be worth the trouble of getting up and picking the daisies, when suddenly a White Rabbit with pink eyes ran close by her.',
+  },
+  {
+    id: 'seed-pandp', title: 'Pride and Prejudice',
+    author: 'Jane Austen', genre: 'Romance',
+    description: 'Elizabeth Bennet spars with the proud Mr. Darcy in the most beloved Regency romance ever written — a comedy of manners, pride, and first impressions.',
+    chapterTitle: 'Chapter 1',
+    opening: 'It is a truth universally acknowledged, that a single man in possession of a good fortune, must be in want of a wife.\n\nHowever little known the feelings or views of such a man may be on his first entering a neighbourhood, this truth is so well fixed in the minds of the surrounding families, that he is considered as the rightful property of some one or other of their daughters.\n\n"My dear Mr. Bennet," said his lady to him one day, "have you heard that Netherfield Park is let at last?"',
+  },
+  {
+    id: 'seed-tale', title: 'A Tale of Two Cities',
+    author: 'Charles Dickens', genre: 'Classics',
+    description: 'London and Paris, 1775: resurrection, revolution, and a sacrifice beyond reckoning in Dickens\' immortal story of two cities and one doomed love.',
+    chapterTitle: 'The Period',
+    opening: 'It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epoch of incredulity, it was the season of Light, it was the season of Darkness, it was the spring of hope, it was the winter of despair, we had everything before us, we had nothing before us, we were all going direct to Heaven, we were all going direct the other way — in short, the period was so far like the present period, that some of its noisiest authorities insisted on its being received, for good or for evil, in the superlative degree of comparison only.',
+  },
+  {
+    id: 'seed-frankenstein', title: 'Frankenstein',
+    author: 'Mary Shelley', genre: 'Science Fiction',
+    description: 'Victor Frankenstein dares to fashion life from death — and is hunted by the wretched creature he abandons. The first great science-fiction novel, born from a nightmare.',
+    chapterTitle: 'Letter 1',
+    opening: '"You will rejoice to hear that no disaster has accompanied the commencement of an enterprise which you have regarded with such evil forebodings. I arrived here yesterday, and my first task is to assure my dear sister of my welfare and increasing confidence in the success of my undertaking.\n\nI am already far north of London, and as I walk in the streets of Petersburgh, I feel a cold northern breeze play upon my cheeks, which braces my nerves and fills me with delight."',
+  },
+  {
+    id: 'seed-timemachine', title: 'The Time Machine',
+    author: 'H. G. Wells', genre: 'Science Fiction',
+    description: 'A dinner-party demonstration becomes a voyage to the year 802,701 — where humanity has split into the gentle Eloi and the subterranean Morlocks.',
+    chapterTitle: 'Chapter 1',
+    opening: 'The Time Traveller (for so it will be convenient to speak of him) was expounding a recondite matter to us. His grey eyes shone and twinkled, and his usually pale face was flushed and animated. The fire burned brightly, and the soft radiance of the incandescent lights in the lilies of silver caught the bubbles that flashed and passed in our glasses.',
+  },
+  {
+    id: 'seed-study-scarlet', title: 'A Study in Scarlet',
+    author: 'Arthur Conan Doyle', genre: 'Crime',
+    description: 'A army surgeon home from the war rooms with a strange man who "beats the band" — the case that introduces Sherlock Holmes and Dr. Watson to the world.',
+    chapterTitle: 'Chapter 1 · Mr. Sherlock Holmes',
+    opening: 'In the year 1878 I took my degree of Doctor of Medicine of the University of London, and proceeded to Netley to go through the course prescribed for surgeons in the army. Having completed my studies there, I was duly attached to the Fifth Northumberland Fusiliers as Assistant Surgeon. The regiment was stationed in India at the time, and before I could join it, the second Afghan war had broken out.',
+  },
+];
+
+async function migrateLegacy(req: Request): Promise<void> {
+  if (migrationMemo) return;
+  const meta = (await dbFor('books')).collection('meta');
+  // Heals legacy books (missing status / moderationStatus) on EVERY cold
+  // start — including already-migrated databases — so the shelf is never
+  // empty. Idempotent, and memoized below via migrationMemo.
+  if (!migrationMemo) {
+    try {
+      const booksCol = (await dbFor('books')).collection('books');
+      // Pure legacy docs: no status at all → publish + approve.
+      await booksCol.updateMany(
+        { $or: [{ status: { $in: [null, ''] } }, { status: { $exists: false } }] } as never,
+        { $set: { status: 'published', moderationStatus: 'approved' } });
+      // Partial legacy docs: published but never stamped by moderation.
+      await booksCol.updateMany(
+        { status: 'published',
+          $or: [{ moderationStatus: { $in: [null, ''] } }, { moderationStatus: { $exists: false } }] } as never,
+        { $set: { moderationStatus: 'approved' } });
+      // A brand-new deployment may have an empty shelf — seed real
+      // public-domain classics so Discover is never blank. Idempotent:
+      // only runs when nothing published exists, and every seeded doc
+      // carries a `seed-` id the moderator can delete like any book.
+      const published = await booksCol.countDocuments({ status: 'published' });
+      if (published === 0) {
+        const chaptersCol = (await dbFor('books')).collection('chapters');
+        for (const s of SEED_BOOKS) {
+          try {
+            await booksCol.insertOne({
+              _id: s.id,
+              title: s.title,
+              authorName: s.author,
+              authorId: null,
+              description: s.description,
+              genre: s.genre,
+              coverUrl: null,
+              contentFormat: 'markdown',
+              moderationStatus: 'approved',
+              status: 'published',
+              clubId: null,
+              chaptersCount: 1,
+              likeCount: 0, bookmarkCount: 0, viewCount: 0,
+              reviewCount: 0, ratingSum: 0,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
+            await chaptersCol.insertOne({
+              _id: `${s.id}-ch1`,
+              bookId: s.id,
+              chapterNumber: 1,
+              title: s.chapterTitle,
+              content: s.opening,
+              createdAt: new Date(),
+            });
+          } catch (e) {
+            if (!isDupKey(e)) throw e;
+          }
+        }
+      }
+    } catch (_) { /* healed again on next cold start */ }
+  }
+  const flag = await meta.findOne({ _id: 'legacy_migration_v1' });
+  if (flag?.done === true) {
+    migrationMemo = true;
+    return;
+  }
+  try {
+    const sc = serviceClient();
+    const feedDb = await dbFor('feed');
+    const groupsDb = await dbFor('groups');
+    const booksDb = await dbFor('books');
+
+    // posts (uuid preserved → existing post_likes keep working)
+    const posts = await sc.from('posts').select('*').limit(2000);
+    for (const row of posts.data ?? []) {
+      try {
+        await feedDb.collection('posts').insertOne({
+          _id: String(row.id),
+          type: row.type ?? 'post',
+          title: row.title ?? null,
+          content: row.content ?? '',
+          metadata: row.metadata ?? {},
+          createdBy: row.created_by ?? null,
+          createdAt: row.created_at ? new Date(row.created_at) : new Date(),
+        });
+      } catch (e) {
+        if (!isDupKey(e)) throw e;
+      }
+    }
+
+    // groups + members
+    for (const kind of GROUP_KINDS) {
+      const rows = await sc.from(kind).select('*').limit(2000);
+      for (const r of rows.data ?? []) {
+        try {
+          await groupsDb.collection(kind).insertOne({
+            _id: String(r.id),
+            name: r.name ?? '',
+            description: r.description ?? '',
+            genreTags: Array.isArray(r.genre_tags) ? r.genre_tags : [],
+            isPrivate: r.is_private === true,
+            coverUrl: r.cover_url ?? null,
+            ownerId: r.owner_id ?? null,
+            viceModeratorId: r.vice_moderator_id ?? null,
+            mission: r.mission ?? null,
+            orgType: r.org_type ?? null,
+            location: r.location ?? null,
+            website: r.website ?? null,
+            schoolType: r.school_type ?? null,
+            createdAt: r.created_at ? new Date(r.created_at) : new Date(),
+          });
+        } catch (e) {
+          if (!isDupKey(e)) throw e;
+        }
+      }
+      const members = await sc.from(`${kind}_members`).select('*').limit(5000);
+      for (const m of members.data ?? []) {
+        try {
+          await groupsDb.collection(`${kind}_members`).insertOne({
+            groupId: String(m[kind.slice(0, -1) + '_id']),
+            userId: String(m.user_id),
+            role: m.role ?? 'member',
+            joinedAt: m.joined_at ? new Date(m.joined_at) : new Date(),
+          });
+        } catch (e) {
+          if (!isDupKey(e)) throw e;
+        }
+      }
+    }
+
+    // books + chapters (uuid preserved; field map to the Mongo shape)
+    const legacyBooks = await sc.from('club_books').select('*').limit(2000);
+    const legacyChapters = await sc.from('book_chapters').select('*').limit(5000);
+    const chapterCount = new Map<string, number>();
+    for (const c of legacyChapters.data ?? []) {
+      const k = String(c.club_book_id);
+      chapterCount.set(k, (chapterCount.get(k) ?? 0) + 1);
+    }
+    for (const b of legacyBooks.data ?? []) {
+      try {
+        await booksDb.collection('books').insertOne({
+          _id: String(b.id),
+          title: b.title ?? 'Untitled',
+          authorName: b.author ?? 'Unknown',
+          authorId: b.added_by ?? null,
+          description: b.description ?? '',
+          genre: b.genre ?? null,
+          coverUrl: b.cover_url ?? null,
+          contentFormat: b.content_format ?? 'markdown',
+          moderationStatus: b.moderation_status === 'pending' ? 'approved' : (b.moderation_status ?? 'approved'),
+          clubId: b.club_id ?? null,
+          chaptersCount: chapterCount.get(String(b.id)) ?? 0,
+          likeCount: 0,
+          bookmarkCount: 0,
+          viewCount: 0,
+          reviewCount: 0,
+          ratingSum: 0,
+          createdAt: b.created_at ? new Date(b.created_at) : new Date(),
+          updatedAt: b.created_at ? new Date(b.created_at) : new Date(),
+        });
+      } catch (e) {
+        if (!isDupKey(e)) throw e;
+      }
+    }
+    for (const c of legacyChapters.data ?? []) {
+      try {
+        await booksDb.collection('chapters').insertOne({
+          bookId: String(c.club_book_id),
+          chapterNumber: Number(c.chapter_number ?? 1) || 1,
+          title: c.title ?? 'Chapter 1',
+          content: c.content ?? '',
+          createdAt: c.created_at ? new Date(c.created_at) : new Date(),
+        });
+      } catch (e) {
+        if (!isDupKey(e)) throw e;
+      }
+    }
+
+    await meta.updateOne(
+      { _id: 'legacy_migration_v1' },
+      { $set: { done: true, at: new Date().toISOString() }, $setOnInsert: { startedAt: new Date().toISOString() } },
+      { upsert: true },
+    );
+    migrationMemo = true;
+  } catch (error) {
+    // Never break the calling action because migration hit a snag — it
+    // retries on the next cold start.
+    console.log('legacy migration deferred:', error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+const todayUtc = () => new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+// Consecutive-day streak math over UTC 'YYYY-MM-DD' day strings.
+function computeStreaks(days: string[]) {
+  const set = new Set(days);
+  const today = todayUtc();
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  let current = 0;
+  let cursor = set.has(today) ? today : set.has(yesterday) ? yesterday : null;
+  while (cursor && set.has(cursor)) {
+    current += 1;
+    cursor = new Date(new Date(cursor + 'T00:00:00Z').getTime() - 86400000)
+      .toISOString()
+      .slice(0, 10);
+  }
+  const sorted = [...set].sort();
+  let longest = 0;
+  let run = 0;
+  let prev: string | null = null;
+  for (const day of sorted) {
+    if (prev !== null) {
+      const gap = (new Date(day + 'T00:00:00Z').getTime() -
+        new Date(prev + 'T00:00:00Z').getTime()) / 86400000;
+      run = gap === 1 ? run + 1 : 1;
+    } else {
+      run = 1;
+    }
+    longest = Math.max(longest, run);
+    prev = day;
+  }
+  const last7: boolean[] = [];
+  for (let i = 6; i >= 0; i--) {
+    const day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    last7.push(set.has(day));
+  }
+  return { current, longest, total: sorted.length, last7 };
+}
+
+const isHexId = (v: unknown): boolean =>
+  typeof v === 'string' && /^[a-f\d]{24}$/i.test(v);
+
+const isUuid = (v: unknown): boolean =>
+  typeof v === 'string' &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+
+// Books may carry either a native ObjectId (published after the MongoDB
+// cutover) or the legacy Supabase UUID (migrated rows) — both are valid.
+// Ids come in three shapes: Mongo ObjectIds (hex), UUIDs (user-authored
+// books), and readable slugs for imported classics ('bulk-alice-s-...').
+// One charset covers all three; anything else simply finds no document.
+const isAnyId = (v: unknown): boolean =>
+  typeof v === 'string' && /^[\w|-]{1,200}$/.test(v);
+const bookOid = (id: string) => (isHexId(id) ? new ObjectId(id) : id);
+const isDupKey = (e: unknown): boolean =>
+  e instanceof Error && e.message.includes('E11000');
+
+function bookView(b: Record<string, unknown>) {
+  const reviewCount = Number(b.reviewCount ?? 0);
+  const ratingSum = Number(b.ratingSum ?? 0);
+  return {
+    id: String(b._id),
+    title: b.title ?? 'Untitled',
+    author: b.authorName ?? 'Unknown',
+    description: b.description ?? '',
+    genre: b.genre ?? null,
+    cover_url: b.coverUrl ?? null,
+    banner_url: b.bannerUrl ?? null,
+    content_format: b.contentFormat ?? 'markdown',
+    moderation_status: b.moderationStatus ?? 'pending',
+    like_count: Math.max(0, Number(b.likeCount ?? 0)),
+    bookmark_count: Math.max(0, Number(b.bookmarkCount ?? 0)),
+    view_count: Math.max(0, Number(b.viewCount ?? 0)),
+    review_count: reviewCount,
+    average_rating:
+      reviewCount > 0 ? Math.round((ratingSum / reviewCount) * 10) / 10 : 0,
+    created_at: b.createdAt ?? null,
+    status: b.status ?? 'published',
+    book_code: b.bookCode ?? null,
+    unit_type: b.unitType ?? 'chapter',
+    part_number: Number(b.partNumber ?? 1),
+    sequel_of: b.sequelOf ?? null,
+    sequel_root: b.sequelRoot ?? null,
+    remix_of: b.remixOf ?? null,
+    is_remix: b.isRemix === true,
+    boosted_until: b.boostUntil ?? null,
+    added_by: b.authorId ?? null,
+    featured: b.featuredAt != null,
+  };
+}
+
+function conversationView(c: Record<string, unknown>, me: string) {
+  const members = Array.isArray(c.memberIds) ? (c.memberIds as string[]) : [];
+  return {
+    id: String(c._id),
+    type: c.type ?? 'direct',
+    peerId: members.find((m) => m !== me) ?? me,
+    lastMessage: c.lastMessage ?? null,
+    updatedAt: c.updatedAt ?? null,
+  };
+}
+
+/** Finds or creates the club room conversation for a group (reused forever). */
+async function ensureClubRoom(
+  kind: string,
+  clubId: string,
+  uid: string,
+  unitId = '',
+  chanName = '',
+): Promise<Record<string, unknown> | null> {
+  const d = await dbFor('chats');
+  const col = d.collection('conversations');
+  try {
+    await col.createIndex({ clubKey: 1 }, { unique: true });
+  } catch { /* index exists */ }
+  const clubKey = unitId
+    ? `${kind}:${clubId}:unit:${unitId}`
+    : chanName
+      ? `${kind}:${clubId}:chan:${chanName.toLowerCase()}`
+      : `${kind}:${clubId}`;
+  const found = await col.findOne({ clubKey });
+  if (found) return found;
+  const club = await (await dbFor('groups')).collection(kind)
+    .findOne({ _id: clubId } as never);
+  let title = String((club?.name as string) ?? 'Group chat').slice(0, 120);
+  if (unitId) {
+    const unit = await (await dbFor('groups')).collection('units')
+      .findOne({ _id: new ObjectId(unitId) } as never);
+    if (unit) title = `${String(unit.name).slice(0, 60)} · ${title}`.slice(0, 120);
+  } else if (chanName) {
+    title = `${chanName.slice(0, 60)} · ${title}`.slice(0, 120);
+  }
+  const now = new Date();
+  const doc = {
+    type: 'club',
+    clubKey,
+    clubId,
+    kind,
+    unitId: unitId || null,
+    title,
+    memberIds: [uid],
+    createdAt: now,
+    updatedAt: now,
+    lastMessage: null,
+  };
+  try {
+    const inserted = await col.insertOne({ ...doc });
+    return { ...doc, _id: inserted.insertedId };
+  } catch (error) {
+    if (isDupKey(error)) return await col.findOne({ clubKey });
+    throw error;
+  }
+}
+
+async function isClubMember(kind: string, clubId: string, uid: string): Promise<boolean> {
+  const members = (await dbFor('groups')).collection(`${kind}_members`);
+  return (await members.countDocuments({ groupId: clubId, userId: uid })) > 0;
+}
+
+async function isUnitMember(unitId: string, uid: string): Promise<boolean> {
+  const members = (await dbFor('groups')).collection('unit_members');
+  return (await members.countDocuments({ unitId, userId: uid })) > 0;
+}
+
+/** Sub-rooms (departments, named channels) gate on their own roster. */
+async function isRoomMember(
+  room: Record<string, unknown> | null,
+  uid: string,
+): Promise<boolean> {
+  if (!room) return false;
+  const unitId = String(room.unitId ?? '');
+  if (unitId) return isUnitMember(unitId, uid);
+  return isClubMember(String(room.kind), String(room.clubId), uid);
+}
+
+/** Owner / deputy check against a group. */
+async function isGroupManager(
+  kind: string,
+  groupId: string,
+  uid: string,
+): Promise<boolean> {
+  const group = await (await dbFor('groups')).collection(kind)
+    .findOne({ _id: groupId } as never,
+      { projection: { ownerId: 1, viceModeratorId: 1 } });
+  return !!group && (group.ownerId === uid || group.viceModeratorId === uid);
+}
+
+// ── chat message toolkit: reactions, deletes, read receipts ────────────────
+type MsgRow = Record<string, unknown> & { _id: ObjectId };
+
+function messageView(m: MsgRow) {
+  return {
+    id: String(m._id),
+    senderId: m.senderId,
+    type: m.type,
+    text: m.text ?? '',
+    bookId: m.bookId ?? null,
+    bookTitle: m.bookTitle ?? null,
+    mediaUrl: m.mediaUrl ?? null,
+    fileName: m.fileName ?? null,
+    fileSize: m.fileSize ?? null,
+    forwarded: m.forwarded === true,
+    animated: m.animated === true,
+    reactions: (m.reactions ?? {}) as Record<string, string>,
+    replyTo: (m.replyTo ?? null) as Record<string, string> | null,
+    deletedFor: (m.deletedFor ?? []) as string[],
+    deletedForEveryone: m.deletedForEveryone === true,
+    readBy: (m.readBy ?? []) as string[],
+    createdAt: m.createdAt,
+  };
+}
+
+async function loadMessage(messageId: string): Promise<MsgRow | null> {
+  if (!isHexId(messageId)) return null;
+  return (await dbFor('chats')).collection('messages')
+    .findOne({ _id: new ObjectId(messageId) }) as Promise<MsgRow | null>;
+}
+
+/** Resolves a quoted message into the lightweight reply preview. */
+async function buildReplyPreview(
+  conversationId: string, replyToId: string,
+): Promise<Record<string, string> | null> {
+  if (!isHexId(replyToId)) return null;
+  const src = await (await dbFor('chats')).collection('messages')
+    .findOne({ _id: new ObjectId(replyToId), conversationId: new ObjectId(conversationId) } as unknown as Record<string, unknown>) as MsgRow | null;
+  if (!src) return null;
+  return {
+    id: String(src._id),
+    senderId: String(src.senderId),
+    type: String(src.type),
+    text: String(src.text ?? (src.type === 'image' ? 'Photo' :
+      src.type === 'video' ? 'Video' : src.type === 'file' ?
+      String(src.fileName ?? 'File') : src.type === 'emoji' ? 'Emote' :
+      src.type === 'voice' ? 'Voice message' : src.type === 'book_share' ?
+      String(src.bookTitle ?? 'Book') : 'Message')).slice(0, 160),
+  };
+}
+
+// ── WhatsApp-style storage law ──────────────────────────────────────────────
+// Messages live on BookNest's servers only while they are useful for
+// syncing — 30 days. Everything older is purged for good; each chat keeps
+// only a tiny last-message preview on its conversation document, so the
+// chat list stays alive. Readers keep their full history encrypted on
+// their device and in their Google-account backup.
+const MESSAGE_RETENTION_DAYS = 30;
+let lastRetentionSweepAt = 0;
+
+async function sweepOldMessages(): Promise<void> {
+  const now = Date.now();
+  if (now - lastRetentionSweepAt < 60 * 60 * 1000) return; // hourly
+  lastRetentionSweepAt = now;
+  try {
+    const d = await dbFor('chats');
+    const boundary = ObjectId.createFromTime(
+      Math.floor((now - MESSAGE_RETENTION_DAYS * 24 * 3600 * 1000) / 1000));
+    // The newest slice of expiry-bound messages, so every affected
+    // conversation can keep a last-message preview.
+    const dying = await d.collection('messages')
+      .find({ _id: { $lt: boundary } })
+      .sort({ _id: -1 })
+      .limit(20000)
+      .project({ conversationId: 1, senderId: 1, type: 1, text: 1,
+        fileName: 1, bookTitle: 1 })
+      .toArray();
+    const previews = new Map<string, Record<string, unknown>>();
+    for (const m of dying) {
+      const key = String(m.conversationId);
+      if (previews.has(key)) continue; // first hit = newest (sorted desc)
+      const type = String(m.type ?? 'text');
+      const text = type === 'text' ? String(m.text ?? '')
+        : type === 'image' ? '📷 Photo'
+        : type === 'video' ? '🎬 Video'
+        : type === 'voice' ? '🎤 Voice message'
+        : type === 'emoji' ? 'Emote'
+        : type === 'book_share' ? String(m.bookTitle ?? 'Book')
+        : String(m.fileName ?? 'File');
+      previews.set(key, {
+        text: text.slice(0, 140), type, senderId: String(m.senderId ?? ''),
+        createdAt: boundary, expired: true,
+      });
+    }
+    for (const [key, preview] of previews) {
+      try {
+        await d.collection('conversations').updateOne(
+          { _id: new ObjectId(key) },
+          { $set: { lastMessage: preview } });
+      } catch { /* conversation already gone */ }
+    }
+    await d.collection('messages').deleteMany({ _id: { $lt: boundary } });
+  } catch { // the sweep never blocks a chat action
+  }
+}
+
+/** The reader ids [uid] has blocked. */
+async function blockedSet(uid: string): Promise<Set<string>> {
+  const rows = await (await dbFor('moderation')).collection('blocks')
+    .find({ userId: uid }).toArray();
+  return new Set(rows.map((r) => String(r.blockedId)));
+}
+
+async function applyReaction(uid: string, messageId: string, emoji: string, isMember: () => Promise<boolean>) {
+  const d = await dbFor('chats');
+  const m = await loadMessage(messageId);
+  if (!m) return fail('Message not found', 404);
+  const conversation = await d.collection('conversations')
+    .findOne({ _id: m.conversationId as unknown as ObjectId });
+  if (!conversation) return fail('Conversation not found', 404);
+  if (!(await isMember())) return fail('Join this conversation first', 403);
+  const reactions = (m.reactions ?? {}) as Record<string, string>;
+  if (reactions[uid] === emoji) {
+    await d.collection('messages').updateOne(
+      { _id: m._id },
+      { $unset: { [`reactions.${uid}`]: '' } as unknown as Record<string, unknown> },
+    );
+    return ok({ reacted: false });
+  }
+  await d.collection('messages').updateOne(
+    { _id: m._id },
+    { $set: { reactions: { ...reactions, [uid]: emoji } } },
+  );
+  return ok({ reacted: true });
+}
+
+async function applyDelete(uid: string, messageId: string, forEveryone: boolean, isMember: () => Promise<boolean>) {
+  const d = await dbFor('chats');
+  const m = await loadMessage(messageId);
+  if (!m) return fail('Message not found', 404);
+  const conversation = await d.collection('conversations')
+    .findOne({ _id: m.conversationId as unknown as ObjectId });
+  if (!conversation) return fail('Conversation not found', 404);
+  if (!(await isMember())) return fail('Join this conversation first', 403);
+  if (forEveryone) {
+    if (String(m.senderId) !== uid) return fail('Only your own messages can be deleted for everyone', 403);
+    await d.collection('messages').updateOne(
+      { _id: m._id },
+      { $set: {
+        deletedForEveryone: true, text: '', mediaUrl: null,
+        bookId: null, bookTitle: null, fileName: null, fileSize: null,
+        reactions: {},
+      } },
+    );
+    return ok({ deleted: 'everyone' });
+  }
+  await d.collection('messages').updateOne(
+    { _id: m._id },
+    { $addToSet: { deletedFor: uid } },
+  );
+  return ok({ deleted: 'me' });
+}
+
+async function applyRead(uid: string, conversationId: string, isMember: () => Promise<boolean>) {
+  if (!(await isMember())) return fail('Join this conversation first', 403);
+  const d = await dbFor('chats');
+  const res = await d.collection('messages').updateMany(
+    { conversationId, senderId: { $ne: uid }, readBy: { $ne: uid } },
+    { $addToSet: { readBy: uid } },
+  );
+  return ok({ marked: res.modifiedCount ?? 0 });
+}
+
+async function userStats(userId: string) {
+  const d = await dbFor('social');
+  const doc = await d.collection('user_stats').findOne({ userId });
+  return {
+    followers: Math.max(0, Number(doc?.followers ?? 0)),
+    following: Math.max(0, Number(doc?.following ?? 0)),
+    posts: Math.max(0, Number(doc?.posts ?? 0)),
+  };
+}
+
+/** Finds or creates the 1:1 conversation between two users (reused forever). */
+async function ensureDirect(a: string, b: string): Promise<Record<string, unknown>> {
+  const d = await dbFor('chats');
+  const memberKey = [a, b].sort().join('|');
+  const found = await d.collection('conversations').findOne({ memberKey });
+  if (found) return conversationView(found, a);
+  const now = new Date();
+  const doc = {
+    type: 'direct',
+    memberKey,
+    memberIds: [a, b],
+    createdAt: now,
+    updatedAt: now,
+    lastMessage: null,
+  };
+  try {
+    const inserted = await d.collection('conversations').insertOne({ ...doc });
+    return conversationView({ ...doc, _id: inserted.insertedId }, a);
+  } catch (error) {
+    if (isDupKey(error)) {
+      const raced = await d.collection('conversations').findOne({ memberKey });
+      if (raced) return conversationView(raced, a);
+    }
+    throw error;
+  }
+}
+
+/** Fixed-window rate limiter. Returns true when the caller is over the
+ * cap for this window. Fails OPEN — a limiter glitch must never take a
+ * feature down; abuse handling here is a speed bump, not a fortress. */
+async function hitLimit(
+  uid: string, bucket: string, max: number, windowMs: number,
+): Promise<boolean> {
+  try {
+    const col = (await dbFor('users')).collection('rate_limits');
+    const key = `${bucket}:${uid}`;
+    const now = new Date();
+    const doc = await col.findOne({ _id: key });
+    if (!doc || !(doc.windowStart instanceof Date) ||
+        now.getTime() - doc.windowStart.getTime() > windowMs) {
+      await col.updateOne(
+        { _id: key },
+        { $set: { count: 1, windowStart: now } },
+        { upsert: true });
+      return false;
+    }
+    const next = (Number(doc.count) || 0) + 1;
+    if (next > max) return true;
+    await col.updateOne({ _id: key }, { $set: { count: next } });
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main handler
+// ---------------------------------------------------------------------------
+Deno.serve(async (req: Request) => {
+  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+
+  if (req.method === 'GET') {
+    return ok({
+      service: 'booknest-api',
+      actions: [
+        'ping',
+        'books.list', 'books.get', 'books.chapter', 'books.publish',
+        'books.like', 'books.bookmark', 'books.view',
+        'reviews.create', 'reviews.list',
+        'social.follow',
+        'dm.ensure', 'dm.send', 'dm.list', 'dm.messages',
+        'notifications.list', 'notifications.read',
+      ],
+    });
+  }
+  if (req.method !== 'POST') return fail('Use POST', 405);
+
+  const rawBody = await req.text();
+  // Paystack webhooks land on this same URL, authenticated by their
+  // HMAC-SHA512 signature header — never by our {action} envelope.
+  const paystackSig = req.headers.get('x-paystack-signature');
+  if (paystackSig) return paystackWebhook(rawBody, paystackSig);
+  let body: { action?: string; payload?: Record<string, unknown> };
+  try {
+    body = JSON.parse(rawBody);
+  } catch {
+    return fail('Invalid JSON body');
+  }
+
+  // ── monetization: fixed catalog, Paystack, subscriptions, allowance ────
+  // Prices live ONLY here and in the catalog table — the app sends a
+  // product id and never an amount. All money is integer minor units
+  // (USD cents / NGN kobo); floating point never touches payment math.
+  const CATALOG: Array<{
+    productId: string; kind: 'gems' | 'plan'; label: string;
+    gems: number; plan: string | null; periodDays: number; unlimited: number;
+    prices: Record<string, number>;
+  }> = [
+    { productId: 'gems_100', kind: 'gems', label: '100 Gems', gems: 100, plan: null, periodDays: 0, unlimited: 0, prices: { USD: 100, NGN: 136200 } },
+    { productId: 'gems_500', kind: 'gems', label: '500 Gems', gems: 500, plan: null, periodDays: 0, unlimited: 0, prices: { USD: 475, NGN: 646950 } },
+    { productId: 'gems_1000', kind: 'gems', label: '1,000 Gems', gems: 1000, plan: null, periodDays: 0, unlimited: 0, prices: { USD: 900, NGN: 1225800 } },
+    { productId: 'gems_5000', kind: 'gems', label: '5,000 Gems', gems: 5000, plan: null, periodDays: 0, unlimited: 0, prices: { USD: 4899, NGN: 6672438 } },
+    { productId: 'gems_10000', kind: 'gems', label: '10,000 Gems', gems: 10000, plan: null, periodDays: 0, unlimited: 0, prices: { USD: 9666, NGN: 13165092 } },
+    { productId: 'reader_monthly', kind: 'plan', label: 'Reader · Monthly', gems: 0, plan: 'reader', periodDays: 30, unlimited: 5, prices: { USD: 833, NGN: 1135121 } },
+    { productId: 'reader_six_month', kind: 'plan', label: 'Reader · 6 Months', gems: 0, plan: 'reader', periodDays: 182, unlimited: 5, prices: { USD: 4998, NGN: 6810725 } },
+    { productId: 'reader_yearly', kind: 'plan', label: 'Reader · Yearly', gems: 0, plan: 'reader', periodDays: 365, unlimited: 5, prices: { USD: 9999, NGN: 13625537 } },
+    { productId: 'bookworm_monthly', kind: 'plan', label: 'BookWorm · Monthly', gems: 0, plan: 'bookworm', periodDays: 30, unlimited: 10, prices: { USD: 1266, NGN: 1725267 } },
+    { productId: 'bookworm_six_month', kind: 'plan', label: 'BookWorm · 6 Months', gems: 0, plan: 'bookworm', periodDays: 182, unlimited: 10, prices: { USD: 7594, NGN: 10348799 } },
+    { productId: 'bookworm_yearly', kind: 'plan', label: 'BookWorm · Yearly', gems: 0, plan: 'bookworm', periodDays: 365, unlimited: 10, prices: { USD: 14999, NGN: 20440037 } },
+  ];
+
+  function monthKeyUtc(d = new Date()): string {
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+
+  function paystackSecret(): string {
+    return (Deno.env.get('PAYSTACK_SECRET_KEY') ?? '').trim();
+  }
+
+  /// The live catalog: the Postgres table when it exists, the fixed
+  /// built-in list otherwise. Same values either way — one source of
+  /// truth in spirit, zero surprise in price.
+  async function catalogProduct(productId: string) {
+    try {
+      const { data, error } = await serviceClient().from('monetization_catalog')
+        .select('*').eq('product_id', productId);
+      if (!error && Array.isArray(data) && data.length > 0) {
+        const prices: Record<string, number> = {};
+        for (const row of data) prices[String(row.currency_code)] = Number(row.amount_in_minor_units);
+        return {
+          productId,
+          kind: String(data[0].kind ?? 'gems') as 'gems' | 'plan',
+          label: String(data[0].label ?? productId),
+          gems: Number(data[0].gems ?? 0),
+          plan: data[0].plan ? String(data[0].plan) : null,
+          periodDays: Number(data[0].period_days ?? 0),
+          unlimited: Number(data[0].unlimited_books ?? 0),
+          prices,
+        };
+      }
+    } catch { /* table not created yet — the fixed catalog answers */ }
+    return CATALOG.find((c) => c.productId === productId) ?? null;
+  }
+
+  async function paystackInit(order: { email: string; amountMinor: number; currency: string; reference: string }) {
+    const res = await fetch('https://api.paystack.co/transaction/initialize', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${paystackSecret()}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: order.email,
+        amount: order.amountMinor,
+        currency: order.currency,
+        reference: order.reference,
+        metadata: { reference: order.reference },
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const body = await res.json().catch(() => null);
+    if (res.status === 200 && body?.status === true && typeof body.data?.authorization_url === 'string') {
+      return body.data.authorization_url as string;
+    }
+    throw new Error(String(body?.message ?? `Paystack initialize failed (${res.status})`));
+  }
+
+  /// One fulfillment path for verify + webhook. Idempotent: an order
+  /// pays exactly once, whatever arrives first.
+  async function fulfillOrder(reference: string): Promise<{ fulfilled: boolean; error?: string }> {
+    const orders = (await dbFor('payments')).collection('orders');
+    const order = await orders.findOne({ reference });
+    if (!order) return { fulfilled: false, error: 'Unknown reference' };
+    if (order.status === 'paid') return { fulfilled: true };
+
+    const secret = paystackSecret();
+    if (!secret) return { fulfilled: false, error: 'Payments are not configured yet' };
+    const res = await fetch(
+      `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
+      {
+        headers: { Authorization: `Bearer ${secret}` },
+        signal: AbortSignal.timeout(15000),
+      },
+    );
+    const body = await res.json().catch(() => null);
+    const data = body?.data;
+    if (!data || data.status !== 'success') {
+      if (data?.status === 'failed') {
+        await orders.updateOne({ reference }, { $set: { status: 'failed' } });
+      }
+      return { fulfilled: false, error: 'Payment not completed yet' };
+    }
+
+    const product = await catalogProduct(String(order.productId));
+    const expected = product ? Number(product.prices[String(order.currency)] ?? 0) : 0;
+    if (!product || expected === 0 || Number(data.amount) !== expected) {
+      // Price tampering or a stale order — refuse fulfillment loudly.
+      await orders.updateOne({ reference }, { $set: { status: 'review', paystackAmount: Number(data.amount) } });
+      return { fulfilled: false, error: 'Payment amount did not match the catalog' };
+    }
+
+    const uid = String(order.userId);
+    if (product.kind === 'gems') {
+      await grantGems(uid, product.gems, 'purchase');
+    } else {
+      // Plan: extend from the current period when renewing, and assign
+      // the unlimited picks once per period (seeded, never rerollable).
+      const subs = (await dbFor('payments')).collection('subscriptions');
+      const now = new Date();
+      const prev = await subs.findOne({ userId: uid });
+      const renewing = !!prev && prev.plan === product.plan &&
+        new Date(String(prev.periodEnds)) > now;
+      const base = renewing ? new Date(String(prev!.periodEnds)) : now;
+      const periodEnds = new Date(base.getTime() + product.periodDays * 86400000);
+      const periodStart = renewing ? new Date(String(prev!.periodStart)) : now;
+      let assignedBooks: string[] | null = prev?.assignedBooks ?? null;
+      const samePeriod = !!prev && renewing &&
+        String(prev?.assignedSeed ?? '') === periodStart.toISOString() &&
+        prev?.assignedPlan === product.plan;
+      if (!samePeriod && product.unlimited > 0) {
+        const pool = await (await dbFor('books')).collection('books')
+          .find({ moderationStatus: 'approved', status: 'published' }, { projection: { _id: 1 } })
+          .limit(300).toArray();
+        let seed = 0;
+        const seedText = `${uid}:${periodStart.toISOString()}`;
+        for (const ch of seedText) seed = (seed * 31 + ch.charCodeAt(0)) & 0x7fffffff;
+        const shuffle = [...pool];
+        for (let i = shuffle.length - 1; i > 0; i--) {
+          seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+          const j = seed % (i + 1);
+          [shuffle[i], shuffle[j]] = [shuffle[j], shuffle[i]];
+        }
+        assignedBooks = shuffle.slice(0, product.unlimited).map((b) => String(b._id));
+      }
+      await subs.updateOne(
+        { userId: uid },
+        {
+          $set: {
+            userId: uid,
+            plan: product.plan,
+            status: 'active',
+            periodStart: periodStart.toISOString(),
+            periodEnds: periodEnds.toISOString(),
+            unlimitedMax: product.unlimited,
+            assignedPlan: product.plan,
+            assignedSeed: periodStart.toISOString(),
+            ...(assignedBooks ? { assignedBooks } : {}),
+            updatedAt: now,
+          },
+        },
+        { upsert: true },
+      );
+    }
+    await orders.updateOne({ reference }, { $set: { status: 'paid', paidAt: new Date() } });
+    return { fulfilled: true };
+  }
+
+  async function paystackWebhook(raw: string, signature: string): Promise<Response> {
+    const secret = paystackSecret();
+    if (!secret) return fail('Payments are not configured yet', 503);
+    const key = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(secret),
+      { name: 'HMAC', hash: 'SHA-512' }, false, ['sign'],
+    );
+    const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(raw));
+    const expected = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    if (expected.length !== signature.length) return fail('Bad signature', 401);
+    let diff = 0;
+    for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ signature.charCodeAt(i);
+    if (diff !== 0) return fail('Bad signature', 401);
+    let event: { event?: string; data?: { reference?: string } };
+    try {
+      event = JSON.parse(raw);
+    } catch {
+      return fail('Invalid JSON body');
+    }
+    if (event.event === 'charge.success' && typeof event.data?.reference === 'string') {
+      try {
+        await fulfillOrder(event.data.reference);
+      } catch { /* the next webhook retry or an app verify will land it */ }
+    }
+    return json({ ok: true, data: { received: true } });
+  }
+
+  const action = body.action ?? '';
+  // Accept both shapes: BackendApi sends { action, payload }, while the
+  // writeRow/updateRow fallbacks send fields at the top level.
+  const p = body.payload ?? body;
+
+  try {
+    switch (action) {
+      // ── health ───────────────────────────────────────────────────────────
+      case 'ping': {
+        // Always answers ok — the `mongo` field tells the truth about the
+        // data layer separately, so callers can distinguish "function is
+        // awake" from "data connection is live". `server` lets the app
+        // detect an outdated deployment (old servers never send it).
+        const base = {
+          databases: DB_NAMES,
+          time: new Date().toISOString(),
+          server: '2.24',
+        };
+        if (!MONGO_URI) return ok({ ...base, db: null, mongo: 'not_configured' });
+        try {
+          const d = await dbFor('books');
+          await d.command({ ping: 1 });
+          return ok({ ...base, db: d.databaseName, mongo: 'ready' });
+        } catch (_) {
+          return ok({ ...base, db: null, mongo: 'unreachable' });
+        }
+      }
+
+      // ── library bulk import (public-domain classics) ─────────────────────
+      // Guarded by IMPORT_TOKEN env (constant-time compare) so the CI
+      // importer can stream batches, or by the overall moderator. Books
+      // upsert by deterministic id; chapters replace only when the text
+      // hash changes, so reruns are cheap and resumable.
+      // ── library on a diet: full texts live on the CDN, MongoDB keeps
+      // pointers. The free tier caps at 512 MB — 1,600 full novels do
+      // not fit, and should never have to.
+      case 'admin.migrateChapterJobs': {
+        const importToken = Deno.env.get('IMPORT_TOKEN') ?? '';
+        const given = String(p.importToken ?? '');
+        const tokenOk = importToken.length > 0 && importToken === given;
+        if (!tokenOk) {
+          const uid = await adminUserId(req);
+          if (!uid) return fail('Import unavailable', 403);
+        }
+        const d = await dbFor('books');
+        const chapters = d.collection('chapters');
+        const limit = Math.min(Math.max(Number(p.limit ?? 40) || 40, 1), 100);
+        // When over quota no writes work at all — not even deletions —
+        // so the migrator walks the collection read-only with a skip
+        // cursor, uploads every text to the CDN, and drops the whole
+        // collection afterwards (all of it is then on the CDN).
+        const skip = Math.min(Math.max(Number(p.skip ?? 0) || 0, 0), 500000);
+        const rows = await chapters.find({
+          content: { $exists: true, $type: 'string', $ne: '' },
+        }).skip(skip).project({
+          bookId: 1, chapterNumber: 1, title: 1,
+          bytes: { $strLenCP: '$content' },
+        }).sort({ _id: 1 }).limit(limit).toArray();
+        const total = await chapters.countDocuments({
+          content: { $exists: true, $type: 'string', $ne: '' },
+        });
+        return ok({
+          jobs: rows.map((r) => ({
+            bookId: r.bookId,
+            chapterNumber: r.chapterNumber,
+            title: r.title ?? '',
+            bytes: r.bytes ?? 0,
+          })),
+          remaining: total,
+        });
+      }
+
+      case 'admin.dumpChapter': {
+        const importToken = Deno.env.get('IMPORT_TOKEN') ?? '';
+        const given = String(p.importToken ?? '');
+        const tokenOk = importToken.length > 0 && importToken === given;
+        if (!tokenOk) {
+          const uid = await adminUserId(req);
+          if (!uid) return fail('Import unavailable', 403);
+        }
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const chapterNumber = Number(p.chapterNumber ?? 1) || 1;
+        const d = await dbFor('books');
+        const chapter = await d.collection('chapters').findOne({
+          bookId: p.bookId as string, chapterNumber,
+        });
+        if (!chapter) return fail('Chapter not found', 404);
+        return ok({
+          title: chapter.title ?? '',
+          content: chapter.content ?? '',
+        });
+      }
+
+      // When the cluster is over quota, Atlas blocks ALL writes except
+      // deletions. The migrator dumps the text to the CDN, tries to
+      // shrink the row, and if that is blocked it drops the row and
+      // re-seeds a compact stub once there is room again.
+      case 'admin.dropChaptersCollection': {
+        const importToken = Deno.env.get('IMPORT_TOKEN') ?? '';
+        const given = String(p.importToken ?? '');
+        const tokenOk = importToken.length > 0 && importToken === given;
+        if (!tokenOk) {
+          const uid = await adminUserId(req);
+          if (!uid) return fail('Import unavailable', 403);
+        }
+        const d = await dbFor('books');
+        // Only called after every chapter text is verified on the CDN
+        // and the manifest (bookId, chapter, title, URL, bytes) is
+        // committed — this collection is fully rebuildable from those.
+        const dropped = await d.collection('chapters').drop();
+        return ok({ dropped });
+      }
+
+      case 'admin.dropChapter': {
+        const importToken = Deno.env.get('IMPORT_TOKEN') ?? '';
+        const given = String(p.importToken ?? '');
+        const tokenOk = importToken.length > 0 && importToken === given;
+        if (!tokenOk) {
+          const uid = await adminUserId(req);
+          if (!uid) return fail('Import unavailable', 403);
+        }
+        if (!isChapterBookId(p.bookId)) return fail('A valid bookId is required');
+        const chapterNumber = Number(p.chapterNumber ?? 1) || 1;
+        const d = await dbFor('books');
+        const res = await d.collection('chapters').deleteOne({
+          bookId: p.bookId as string, chapterNumber,
+        });
+        return ok({ deleted: res.deletedCount ?? 0 });
+      }
+
+      case 'admin.restoreChapterStub': {
+        const importToken = Deno.env.get('IMPORT_TOKEN') ?? '';
+        const given = String(p.importToken ?? '');
+        const tokenOk = importToken.length > 0 && importToken === given;
+        if (!tokenOk) {
+          const uid = await adminUserId(req);
+          if (!uid) return fail('Import unavailable', 403);
+        }
+        if (!isChapterBookId(p.bookId)) return fail('A valid bookId is required');
+        const chapterNumber = Number(p.chapterNumber ?? 1) || 1;
+        const url = String(p.url ?? '');
+        if (!url.startsWith('https://res.cloudinary.com/')) {
+          return fail('Only Cloudinary URLs are accepted');
+        }
+        const d = await dbFor('books');
+        await d.collection('chapters').updateOne(
+          { bookId: p.bookId as string, chapterNumber },
+          { $set: {
+              title: String(p.title ?? `Chapter ${chapterNumber}`).slice(0, 160),
+              content: '',
+              contentUrl: url.slice(0, 500),
+              contentBytes: Math.max(0, Number(p.bytes ?? 0) || 0),
+            } },
+          { upsert: true });
+        return ok({ restored: 1 });
+      }
+
+      case 'admin.setChapterUrl': {
+        const importToken = Deno.env.get('IMPORT_TOKEN') ?? '';
+        const given = String(p.importToken ?? '');
+        const tokenOk = importToken.length > 0 && importToken === given;
+        if (!tokenOk) {
+          const uid = await adminUserId(req);
+          if (!uid) return fail('Import unavailable', 403);
+        }
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const chapterNumber = Number(p.chapterNumber ?? 1) || 1;
+        const url = String(p.url ?? '');
+        if (!url.startsWith('https://res.cloudinary.com/')) {
+          return fail('Only BookNest CDN URLs are accepted');
+        }
+        const d = await dbFor('books');
+        const res = await d.collection('chapters').updateOne(
+          { bookId: p.bookId as string, chapterNumber },
+          { $set: {
+              content: '',
+              contentUrl: url,
+              contentBytes: Number(p.bytes ?? 0) || 0,
+            } });
+        if (res.matchedCount === 0) return fail('Chapter not found', 404);
+        return ok({ freed: Number(p.bytes ?? 0) || 0 });
+      }
+
+      case 'admin.importBooks': {
+        const importToken = Deno.env.get('IMPORT_TOKEN') ?? '';
+        const given = String(p.importToken ?? '');
+        const tokenOk = importToken.length > 0 && importToken === given;
+        if (!tokenOk) {
+          const uid = await adminUserId(req);
+          if (!uid) return fail('Import unavailable', 403);
+        }
+        const rows = Array.isArray(p.books) ? p.books : [];
+        if (rows.length === 0) return fail('No books in the batch');
+        if (rows.length > 40) return fail('Batch too large — send 40 or fewer');
+        const d = await dbFor('books');
+        const booksCol = d.collection('books');
+        const chaptersCol = d.collection('chapters');
+        let imported = 0;
+        let skipped = 0;
+        for (const row of rows) {
+          try {
+            const title = String(row.title ?? '').trim().slice(0, 200);
+            const author = String(row.author ?? 'Unknown').trim().slice(0, 120);
+            if (!title) { skipped += 1; continue; }
+            const slug = (title + '|' + author).toLowerCase()
+              .replace(/[^a-z0-9|]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 90);
+            const id = 'bulk-' + slug;
+            const chaptersRaw = Array.isArray(row.chapters) ? row.chapters : [];
+            const chapters = chaptersRaw.slice(0, 300).map((c, i) => ({
+              chapterNumber: Number(c.chapterNumber ?? i + 1) || i + 1,
+              title: String(c.title ?? `Chapter ${i + 1}`).slice(0, 160),
+              content: String(c.content ?? '').slice(0, 400_000),
+            })).filter((c) => c.content.length > 0);
+            if (chapters.length === 0) { skipped += 1; continue; }
+            const crypto_ = globalThis.crypto;
+            const digest = await crypto_.subtle.digest('SHA-256',
+              new TextEncoder().encode(chapters.map((c) => c.content).join('\u0000')));
+            const contentHash = [...new Uint8Array(digest)].slice(0, 16)
+              .map((b) => b.toString(16).padStart(2, '0')).join('');
+            const existing = await booksCol.findOne({ _id: id });
+            if (existing && existing.contentHash === contentHash) {
+              skipped += 1;
+              continue;
+            }
+            const now = new Date();
+            const cover = typeof row.coverUrl === 'string' &&
+                    row.coverUrl.startsWith('http')
+                ? row.coverUrl.slice(0, 500)
+                : (existing?.coverUrl ?? null);
+            await booksCol.updateOne(
+              { _id: id },
+              { $set: {
+                  title,
+                  authorName: author,
+                  authorId: existing?.authorId ?? null,
+                  description: String(row.description ?? '').slice(0, 1200),
+                  genre: String(row.genre ?? 'Classics').slice(0, 40),
+                  coverUrl: cover,
+                  contentFormat: 'markdown',
+                  moderationStatus: 'approved',
+                  status: 'published',
+                  contentHash,
+                  chaptersCount: chapters.length,
+                  updatedAt: now,
+                },
+                $setOnInsert: {
+                  clubId: null,
+                  likeCount: 0, bookmarkCount: 0, viewCount: 0,
+                  reviewCount: 0, ratingSum: 0,
+                  createdAt: now,
+                } } as never,
+              { upsert: true });
+            if (existing && existing.contentHash !== contentHash) {
+              await chaptersCol.deleteMany({ bookId: id });
+            }
+            for (const c of chapters) {
+              await chaptersCol.updateOne(
+                { bookId: id, chapterNumber: c.chapterNumber },
+                { $set: { title: c.title, content: c.content } },
+                { upsert: true });
+            }
+            imported += 1;
+          } catch (_) {
+            skipped += 1;
+          }
+        }
+        return ok({ imported, skipped });
+      }
+
+      // ── dictionary: Word Nest server edition (WordNet 3.1) ─────────────
+      // The bundled edition (94 curated words) works offline; this is the
+      // full library — ~97,000 entries imported into the dictionary DB.
+      case 'dictionary.search': {
+        const q = String(p.q ?? '').trim().slice(0, 60);
+        if (!q) return ok({ entries: [] });
+        const limit = Math.min(Math.max(Number(p.limit ?? 24) || 24, 1), 40);
+        const d = await dbFor('dictionary');
+        const col = d.collection('words');
+        const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const proj = { projection: { _id: 0 } };
+        const from = (rows: Record<string, unknown>[]) =>
+          rows.map((r) => ({ w: r.w, p: r.p, d: r.d, e: r.e, s: r.s ?? [] }));
+        const prefix = from(await col.find(
+          { w: { $regex: '^' + esc, $options: 'i' } }, proj).limit(limit).toArray());
+        const seen = new Set(prefix.map((r) => `${r.w}|${r.p}`));
+        if (prefix.length < limit) {
+          const infix = from(await col.find(
+            { w: { $regex: esc, $options: 'i' } }, proj).limit(limit * 2).toArray());
+          for (const row of infix) {
+            const key = `${row.w}|${row.p}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              prefix.push(row);
+              if (prefix.length >= limit) break;
+            }
+          }
+        }
+        return ok({ entries: prefix.slice(0, limit) });
+      }
+
+      case 'dictionary.entry': {
+        const word = String(p.word ?? '').trim().toLowerCase().slice(0, 60);
+        if (!word) return fail('Which word?');
+        const d = await dbFor('dictionary');
+        const rows = await d.collection('words').find(
+          { w: word }, { projection: { _id: 0 } }).toArray();
+        return ok({ entries: rows.map((r) => ({ w: r.w, p: r.p, d: r.d, e: r.e, s: r.s ?? [] })) });
+      }
+
+      case 'dictionary.import': {
+        const importToken = Deno.env.get('IMPORT_TOKEN') ?? '';
+        const given = String(p.importToken ?? '');
+        const tokenOk = importToken.length > 0 && importToken === given;
+        if (!tokenOk) {
+          const uid = await adminUserId(req);
+          if (!uid) return fail('Import unavailable', 403);
+        }
+        const rows = Array.isArray(p.words) ? p.words : [];
+        if (rows.length === 0) return fail('No words in the batch');
+        if (rows.length > 300) return fail('Batch too large — send 300 or fewer');
+        const d = await dbFor('dictionary');
+        const col = d.collection('words');
+        await col.createIndex({ w: 1 });
+        const ops = [];
+        for (const row of rows) {
+          const w = String(row.w ?? '').trim().toLowerCase().slice(0, 60);
+          const def = String(row.d ?? '').trim().slice(0, 1600);
+          if (!w || !def) continue;
+          const pos = String(row.p ?? '').trim().slice(0, 12) || 'word';
+          ops.push({
+            replaceOne: {
+              filter: { _id: w + '|' + pos },
+              replacement: {
+                w, p: pos, d: def,
+                e: String(row.e ?? '').trim().slice(0, 300),
+                s: Array.isArray(row.s)
+                  ? row.s.map((x) => String(x).slice(0, 40)).slice(0, 10)
+                  : [],
+              },
+              upsert: true,
+            },
+          });
+        }
+        if (ops.length === 0) return ok({ imported: 0, skipped: rows.length });
+        const res = await col.bulkWrite(ops as never, { ordered: false });
+        return ok({ imported: res.upsertedCount + res.modifiedCount, skipped: rows.length - ops.length });
+      }
+
+      // A comic is a tiny normalized-coordinate document (< 10 KB/page),
+      // rendered by the app — never a flattened image. Art itself rides
+      // Cloudinary; the document stores URLs only.
+      case 'calls.ice': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const stun = [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ];
+        const turnUrl = Deno.env.get('TURN_URL');
+        const turnSecret = Deno.env.get('TURN_SECRET');
+        if (!turnUrl || !turnSecret) return ok({ iceServers: stun, turn: false });
+        const expiry = Math.floor(Date.now() / 1000) + 60 * 60 * 6;
+        const username = String(expiry);
+        const key = await crypto.subtle.importKey(
+          'raw', new TextEncoder().encode(turnSecret),
+          { name: 'HMAC', hash: 'SHA-1' }, false, ['sign'],
+        );
+        const sig = await crypto.subtle.sign(
+          'HMAC', key, new TextEncoder().encode(username));
+        let hex = '';
+        for (const b of new Uint8Array(sig)) hex += String.fromCharCode(b);
+        const credential = btoa(hex);
+        const turnServers = turnUrl.split(',').map((u) => u.trim())
+          .filter(Boolean)
+          .map((urls) => ({ urls, username, credential }));
+        return ok({ iceServers: [...stun, ...turnServers], turn: true });
+      }
+
+      // ── resilience: RLS-exempt whitelisted write (ownership force-bound) ─
+      case 'db.write': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in to make changes.', 401);
+        const table = String(p.table ?? '');
+        const op = String(p.op ?? 'insert');
+        if (!WRITABLE_TABLES.has(table)) return fail('Table not writable.', 400);
+        const ownerCol = OWNER_COLUMN[table];
+        const db = serviceClient().from(table);
+        if (op === 'insert') {
+          const values = { ...(p.values as Record<string, unknown> ?? {}) };
+          if (ownerCol) values[ownerCol] = uid;
+          const { data, error } = await db.insert(values).select().single();
+          if (error) return fail(error.message, 400);
+          return ok({ row: data });
+        }
+        if (op === 'update') {
+          const match = { ...(p.match as Record<string, unknown> ?? {}) };
+          if (ownerCol) match[ownerCol] = uid;
+          const { data, error } = await db.update(p.values ?? {}).match(match)
+            .select().single();
+          if (error) return fail(error.message, 400);
+          return ok({ row: data });
+        }
+        if (op === 'delete') {
+          const match = { ...(p.match as Record<string, unknown> ?? {}) };
+          if (ownerCol) match[ownerCol] = uid;
+          const { error } = await db.delete().match(match);
+          if (error) return fail(error.message, 400);
+          return ok({ deleted: true });
+        }
+        return fail('Unsupported op.', 400);
+      }
+
+      // ── wallet: gems (balance in Supabase profiles, ledger in Mongo) ─────
+      case 'wallet.summary': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const col = dbFor('users').collection('gem_ledger');
+        const ledger = await col.find({ userId: uid })
+          .sort({ createdAt: -1 }).limit(50).toArray();
+        const prof = await serviceClient().from('profiles')
+          .select('gems').eq('id', uid).single();
+        return ok({
+          gems: prof.error ? 0 : Number(prof.data?.gems ?? 0),
+          ledger: ledger.map((d: any) => ({
+            delta: d.delta, reason: d.reason, day: d.day ?? null,
+            createdAt: d.createdAt,
+          })),
+        });
+      }
+
+      // One daily bonus claim per UTC day, enforced by the ledger itself.
+      case 'wallet.claim': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const col = dbFor('users').collection('gem_ledger');
+        const day = todayUtc();
+        const existing = await col.findOne({ userId: uid, reason: 'daily', day });
+        if (existing) {
+          const prof = await serviceClient().from('profiles')
+            .select('gems').eq('id', uid).single();
+          return ok({ granted: false, gems: prof.error ? 0 : Number(prof.data?.gems ?? 0) });
+        }
+        const gems = await grantGems(uid, 5, 'daily', day);
+        return ok({ granted: true, gems });
+      }
+
+      // Spend gems for real value: boosting a book pins it to the top of
+      // its shelves for 3 days. Balance and ledger enforced server-side.
+      // The gem ledger, newest first — earning and spending in the open.
+      case 'wallet.history': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const col = dbFor('users').collection('gem_ledger');
+        const rows = await col.find({ userId: uid })
+          .sort({ createdAt: -1 }).limit(30).toArray();
+        return ok({
+          history: rows.map((r) => ({
+            delta: Number(r.delta ?? 0),
+            reason: String(r.reason ?? ''),
+            createdAt: r.createdAt,
+          })),
+        });
+      }
+
+      // ── store: catalog + paystack purchases + subscriptions ────────────
+      case 'wallet.catalog': {
+        const products = [];
+        for (const def of CATALOG) {
+          const live = await catalogProduct(def.productId);
+          products.push(live ?? def);
+        }
+        return ok({ products });
+      }
+
+      case 'payments.initialize': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const product = await catalogProduct(String(p.productId ?? ''));
+        if (!product) return fail('Unknown product', 404);
+        const currency = String(p.currency ?? 'NGN').toUpperCase() === 'USD' ? 'USD' : 'NGN';
+        const amountMinor = Number(product.prices[currency] ?? 0);
+        if (amountMinor <= 0) return fail('This product is not sold in that currency yet');
+        if (!paystackSecret()) {
+          return fail('Card payments are not switched on yet — check back shortly', 503);
+        }
+        let email = '';
+        try {
+          const auth = await serviceClient().auth.admin.getUserById(uid);
+          email = String(auth.data?.user?.email ?? '');
+        } catch { /* fall through */ }
+        if (!email) {
+          try {
+            const prof = await serviceClient().from('profiles')
+              .select('email').eq('id', uid).maybeSingle();
+            email = String(prof.data?.email ?? '');
+          } catch { /* fall through */ }
+        }
+        if (!email) email = `reader-${uid.slice(0, 12)}@booknest.app`;
+        const reference = `BN-${uid.slice(0, 8)}-${Date.now().toString(36)}`;
+        await (await dbFor('payments')).collection('orders').insertOne({
+          reference, userId: uid, productId: product.productId,
+          kind: product.kind, currency, amountMinor,
+          status: 'initialized', createdAt: new Date(),
+        });
+        const checkoutUrl = await paystackInit({ email, amountMinor, currency, reference });
+        return ok({ checkoutUrl, reference });
+      }
+
+      case 'payments.verify': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const reference = String(p.reference ?? '');
+        if (!/^[A-Za-z0-9-]{6,80}$/.test(reference)) return fail('A valid reference is required');
+        const order = await (await dbFor('payments')).collection('orders')
+          .findOne({ reference });
+        if (!order || order.userId !== uid) return fail('Unknown reference', 404);
+        const result = await fulfillOrder(reference);
+        const fresh = await (await dbFor('payments')).collection('orders')
+          .findOne({ reference });
+        const prof = await serviceClient().from('profiles')
+          .select('gems').eq('id', uid).maybeSingle();
+        return ok({
+          status: String(fresh?.status ?? 'initialized'),
+          fulfilled: result.fulfilled,
+          error: result.error ?? null,
+          gems: prof.error ? 0 : Number(prof.data?.gems ?? 0),
+        });
+      }
+
+      case 'sub.status': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const sub = await (await dbFor('payments')).collection('subscriptions')
+          .findOne({ userId: uid });
+        const now = new Date();
+        const active = !!sub && sub.status === 'active' &&
+          new Date(String(sub.periodEnds)) > now;
+        const monthKey = monthKeyUtc();
+        const logs = await (await dbFor('social')).collection('reading_logs')
+          .find({ userId: uid, day: { $regex: `^${monthKey}` } })
+          .toArray();
+        const monthMinutes = logs.reduce((sum, r) => sum + Number(r.minutes ?? 0), 0);
+        const allowanceGems = Math.floor(monthMinutes / 12);
+        const ledger = (await dbFor('users')).collection('gem_ledger');
+        const grantedRows = await ledger.find({
+          userId: uid, reason: 'bookworm_allowance', day: monthKey,
+        }).toArray();
+        const grantedGems = grantedRows.reduce((sum, r) => sum + Number(r.delta ?? 0), 0);
+        return ok({
+          active,
+          plan: active ? String(sub!.plan) : null,
+          periodEnds: active ? String(sub!.periodEnds) : null,
+          unlimitedBooks: active && Array.isArray(sub!.assignedBooks)
+            ? sub!.assignedBooks.map(String)
+            : [],
+          unlimitedMax: active ? Number(sub!.unlimitedMax ?? 0) : 0,
+          discountPct: active ? 20 : 0,
+          allowance: {
+            monthMinutes,
+            allowanceGems,
+            grantedGems,
+            pendingGems: Math.max(0, allowanceGems - grantedGems),
+          },
+        });
+      }
+
+      // BookWorm monthly reading allowance: verified reading minutes ÷ 12,
+      // granted as the difference not yet paid — never double-granted.
+      case 'reading.allowance': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const sub = await (await dbFor('payments')).collection('subscriptions')
+          .findOne({ userId: uid });
+        const now = new Date();
+        const active = !!sub && sub.status === 'active' &&
+          new Date(String(sub.periodEnds)) > now;
+        if (!active || sub!.plan !== 'bookworm') {
+          return fail('An active BookWorm subscription is required for the reading allowance');
+        }
+        const monthKey = monthKeyUtc();
+        const logs = await (await dbFor('social')).collection('reading_logs')
+          .find({ userId: uid, day: { $regex: `^${monthKey}` } })
+          .toArray();
+        const monthMinutes = logs.reduce((sum, r) => sum + Number(r.minutes ?? 0), 0);
+        const allowanceGems = Math.floor(monthMinutes / 12);
+        const ledger = (await dbFor('users')).collection('gem_ledger');
+        const grantedRows = await ledger.find({
+          userId: uid, reason: 'bookworm_allowance', day: monthKey,
+        }).toArray();
+        const grantedGems = grantedRows.reduce((sum, r) => sum + Number(r.delta ?? 0), 0);
+        const pending = Math.max(0, allowanceGems - grantedGems);
+        let gems = 0;
+        if (pending > 0) gems = await grantGems(uid, pending, 'bookworm_allowance', monthKey);
+        return ok({
+          monthMinutes, allowanceGems, grantedGems: grantedGems + pending,
+          pendingGems: 0, granted: pending, gems,
+        });
+      }
+
+      case 'gems.spend': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? '');
+        if (kind !== 'boost_book') return fail('Unknown spend kind');
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const d = await dbFor('books');
+        const book = await d.collection('books')
+          .findOne({ _id: bookOid(String(p.bookId)) }, { projection: { authorId: 1 } });
+        if (!book) return fail('Book not found', 404);
+        if (book.authorId !== uid) return fail('Only the author can boost this book', 403);
+        const prof = await serviceClient().from('profiles')
+          .select('gems').eq('id', uid).single();
+        const balance = prof.error ? 0 : Number(prof.data?.gems ?? 0);
+        if (balance < 20) return fail('You need 20 gems to boost — claim your daily gems first.');
+        const gems = await grantGems(uid, -20, 'boost_book');
+        const until = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+        await d.collection('books').updateOne(
+          { _id: book._id as unknown as ObjectId },
+          { $set: { boostUntil: until, updatedAt: new Date() } },
+        );
+        return ok({ gems, boostedUntil: until });
+      }
+
+      // ── Jenny: the AI reading companion (JENNY_API_KEY edge secret) ──────
+      case 'jenny.chat': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const message = String(p.message ?? '').trim();
+        if (!message) return fail('Say something to Jenny first.');
+        const col = dbFor('chats').collection('jenny_messages');
+        const recent = await col.find({ userId: uid })
+          .sort({ createdAt: -1 }).limit(10).toArray();
+        const history = recent.reverse().map((d: any) => ({
+          role: d.role as string, content: String(d.content ?? ''),
+        }));
+        await col.insertOne({
+          userId: uid, role: 'user', content: message, createdAt: new Date(),
+        });
+        const apiKey = Deno.env.get('JENNY_API_KEY');
+        let reply: string;
+        let connected = true;
+        if (!apiKey) {
+          connected = false;
+          reply = "I'm not connected to my brain yet — please check back "
+            + 'soon, I will be all ears (and all books) 📖';
+        } else {
+          try {
+            const base = Deno.env.get('JENNY_API_URL') ?? 'https://api.openai.com/v1';
+            const model = Deno.env.get('JENNY_MODEL') ?? 'gpt-4o-mini';
+            const res = await fetch(`${base}/chat/completions`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${apiKey}`,
+              },
+              body: JSON.stringify({
+                model,
+                messages: [
+                  {
+                    role: 'system',
+                    content: "You are Jenny, BookNest's warm, book-loving AI "
+                      + 'companion. Keep replies short, kind and practical — '
+                      + 'recommend books, explain study topics, cheer the '
+                      + 'reader on. You know WAEC and African literature well.',
+                  },
+                  ...history,
+                  { role: 'user', content: message },
+                ],
+                max_tokens: 400,
+              }),
+            });
+            const data = await res.json();
+            reply = data?.choices?.[0]?.message?.content
+              ?? 'Hmm — my thoughts got tangled. Ask me again?';
+          } catch {
+            connected = false;
+            reply = 'I could not reach my service just now. Try again shortly.';
+          }
+        }
+        await col.insertOne({
+          userId: uid, role: 'assistant', content: reply, createdAt: new Date(),
+        });
+        return ok({ connected, reply });
+      }
+
+      // ── events: agenda + RSVP (posts table; RSVPs in Mongo social) ───────
+      // ── cutover: one-time, idempotent migration of the legacy SQL rows ───
+      // (posts, groups, members, books, chapters) into their MongoDB homes.
+      // Post/club/book ids are preserved exactly, so existing likes, saves
+      // and reviews keep working. Guarded by a flag document; never fails
+      // the calling action.
+      case 'admin.migrate': {
+        await migrateLegacy(req);
+        const flag = await (await dbFor('books')).collection('meta').findOne({ _id: 'legacy_migration_v1' });
+        return ok({ migrated: flag?.done === true, at: flag?.at ?? null });
+      }
+
+      // ── books: draft + chapter append (editor flow, Mongo-first) ─────────
+      // ── gems: one honest ledger. Balance lives in profiles, history in Mongo.
+      async function grantGems(uid: string, delta: number, reason: string, day: string | null = null) {
+        const prof = await serviceClient().from('profiles')
+          .select('gems').eq('id', uid).single();
+        const current = prof.error ? 0 : Math.max(0, Number(prof.data?.gems ?? 0));
+        const next = Math.max(0, current + delta);
+        await serviceClient().from('profiles').update({ gems: next }).eq('id', uid);
+        await (await dbFor('users')).collection('gem_ledger').insertOne({
+          userId: uid, delta, reason, day,
+          createdAt: new Date(),
+        });
+        return next;
+      }
+
+      // ── book identity: unique Book IDs, drafts, sequels, units ───────────
+      const UNIT_TYPES = ['chapter', 'part', 'act', 'episode', 'volume'];
+
+      function cleanBookCode(raw: unknown): string | null {
+        if (typeof raw !== 'string') return null;
+        const code = raw.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '');
+        return code.length >= 3 && code.length <= 24 ? code : null;
+      }
+
+      /** Resolves the Book ID: rejects stolen codes, chains sequels for the
+       *  same author+code+title, and returns the fields to store. Throws
+       *  an error message when the code is taken. */
+      async function resolveBookIdentity(
+        uid: string,
+        bookCode: string,
+        title: string,
+      ): Promise<{ sequelOf: string | null; sequelRoot: string | null; partNumber: number }> {
+        const d = await dbFor('books');
+        const existing = await d.collection('books')
+          .find({ bookCode }, { projection: {
+            _id: 1, authorId: 1, title: 1, partNumber: 1, sequelRoot: 1,
+          } })
+          .sort({ partNumber: -1 }).limit(1).toArray();
+        if (existing.length === 0) {
+          return { sequelOf: null, sequelRoot: null, partNumber: 1 };
+        }
+        const last = existing[0];
+        if (String(last.authorId) !== uid) {
+          throw new Error('That Book ID is already used by another author — choose another.');
+        }
+        const sameStory = String(last.title).trim().toLowerCase() === title.trim().toLowerCase();
+        if (!sameStory) {
+          throw new Error('That Book ID belongs to “' + String(last.title) + '” — same ID + same title makes a sequel. Rename this book or pick a new ID.');
+        }
+        const root = last.sequelRoot ?? String(last._id);
+        return {
+          sequelOf: String(last._id),
+          sequelRoot: root,
+          partNumber: Number(last.partNumber ?? 1) + 1,
+        };
+      }
+
+      case 'books.createDraft': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const title = String(p.title ?? '').trim();
+        if (title.length < 2 || title.length > 200) return fail('Title must be 2–200 characters');
+        const bookCode = cleanBookCode(p.bookCode);
+        if (!bookCode) return fail('A Book ID of 3–24 letters, numbers or dashes is required');
+        let identity;
+        try {
+          identity = await resolveBookIdentity(uid, bookCode, title);
+        } catch (e) {
+          return fail(e instanceof Error ? e.message : 'Could not use that Book ID');
+        }
+        const now = new Date();
+        const prof = await serviceClient().from('profiles')
+          .select('username,display_name').eq('id', uid).maybeSingle();
+        const doc = {
+          _id: crypto.randomUUID(),
+          title,
+          authorId: uid,
+          authorName: (() => {
+            const requested = typeof p.authorName === 'string' ? p.authorName.trim() : '';
+            const clean = requested && !requested.includes('@')
+              ? requested
+              : String(prof.data?.display_name ?? prof.data?.username ?? 'Unknown');
+            return clean.slice(0, 80);
+          })(),
+          description: String(p.description ?? '').slice(0, 5000),
+          genre: typeof p.genre === 'string' && p.genre.trim() ? p.genre.trim() : null,
+          coverUrl: typeof p.coverUrl === 'string' && p.coverUrl.startsWith('http') ? p.coverUrl : null,
+          bannerUrl: typeof p.bannerUrl === 'string' && p.bannerUrl.startsWith('http') ? p.bannerUrl : null,
+          contentFormat: 'quill',
+          moderationStatus: 'approved',
+          status: 'draft',
+          bookCode,
+          unitType: UNIT_TYPES.includes(String(p.unitType)) ? String(p.unitType) : 'chapter',
+          partNumber: identity.partNumber,
+          sequelOf: identity.sequelOf,
+          sequelRoot: identity.sequelRoot,
+          isRemix: false,
+          clubId: typeof p.clubId === 'string' && p.clubId ? p.clubId : null,
+          chaptersCount: 0,
+          likeCount: 0, bookmarkCount: 0, viewCount: 0, reviewCount: 0, ratingSum: 0,
+          createdAt: now, updatedAt: now,
+        };
+        await (await dbFor('books')).collection('books').insertOne(doc);
+        return ok({ id: doc._id, partNumber: identity.partNumber });
+      }
+
+      case 'books.addChapter': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const bookId = String(p.bookId);
+        const d = await dbFor('books');
+        const book = await d.collection('books')
+          .findOne({ _id: bookOid(bookId) }, { projection: { authorId: 1, chaptersCount: 1 } });
+        if (!book) return fail('Book not found', 404);
+        if (book.authorId !== uid) return fail('Only the author can add chapters', 403);
+        const existing = await d.collection('chapters')
+          .find({ bookId }, { projection: { chapterNumber: 1 } }).toArray();
+        const used = new Set(existing.map((c) => Number(c.chapterNumber)));
+        let n = 1;
+        while (used.has(n)) n++;
+        await d.collection('chapters').insertOne({
+          bookId,
+          chapterNumber: n,
+          title: String(p.title ?? `Chapter ${n}`).slice(0, 200),
+          content: String(p.content ?? '').slice(0, 500_000),
+          createdAt: new Date(),
+        });
+        await d.collection('books')
+          .updateOne({ _id: bookOid(bookId) }, { $set: { chaptersCount: used.size + 1, updatedAt: new Date() } });
+        return ok({ chapterNumber: n });
+      }
+
+      case 'groups.saveAnnouncementGroup': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const name = String(p.name ?? '').trim();
+        if (!name) return fail('A name is required');
+        const id = crypto.randomUUID();
+        await (await dbFor('groups')).collection('announcement_groups').insertOne({
+          _id: id,
+          communityId: String(p.communityId ?? ''),
+          name: name.slice(0, 120),
+          ownerId: uid,
+          createdAt: new Date(),
+        });
+        return ok({ id });
+      }
+
+      // ── feed: posts (feed store; author profiles remain on Supabase) ─────
+      case 'posts.list': {
+        await migrateLegacy(req);
+        const uid = await currentUserId(req);
+        const rows = await (await dbFor('feed')).collection('posts')
+          .find({}).sort({ createdAt: -1 }).limit(60).toArray();
+        const pageIds = rows.map((r) => String(r._id));
+        const likeRows = pageIds.length
+          ? await (await dbFor('social')).collection('post_likes')
+              .find({ postId: { $in: pageIds } }, { projection: { postId: 1, userId: 1 } })
+              .toArray()
+          : [];
+        const likeCounts = new Map<string, number>();
+        const likedByMe = new Set<string>();
+        for (const l of likeRows) {
+          const key = String(l.postId);
+          likeCounts.set(key, (likeCounts.get(key) ?? 0) + 1);
+          if (uid && String(l.userId) === uid) likedByMe.add(key);
+        }
+        const authorIds = [...new Set(rows.map((r) => String(r.createdBy)))];
+        const authors = new Map<string, Record<string, unknown>>();
+        if (authorIds.length > 0) {
+          const profs = await serviceClient().from('profiles')
+            .select('id,username,avatar_url,display_name').in('id', authorIds);
+          for (const pr of profs.data ?? []) {
+            authors.set(String(pr.id), pr as Record<string, unknown>);
+          }
+        }
+        return ok({
+          posts: rows.map((r) => ({
+            id: String(r._id),
+            type: r.type ?? 'post',
+            title: r.title ?? null,
+            content: r.content ?? '',
+            metadata: r.metadata ?? {},
+            like_count: likeCounts.get(String(r._id)) ?? 0,
+            liked_by_me: likedByMe.has(String(r._id)),
+            view_count: Math.max(0, Number(r.viewCount ?? 0)),
+            comment_count: Math.max(0, Number(r.commentCount ?? 0)),
+            reshare_count: Math.max(0, Number(r.reshareCount ?? 0)),
+            created_by: r.createdBy ?? null,
+            created_at: r.createdAt ?? null,
+            profiles: authors.get(String(r.createdBy)) ??
+              { username: 'reader', avatar_url: null, display_name: 'Reader' },
+          })),
+        });
+      }
+
+      case 'posts.create': {
+        {
+          const author = await currentUserId(req);
+          if (author && await isBanned(author)) {
+            return fail('Your account is suspended — contact support');
+          }
+        }
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const type = String(p.type ?? 'post').slice(0, 24);
+        const content = String(p.content ?? '').slice(0, 20_000);
+        const title = p.title == null ? null : String(p.title).slice(0, 200);
+        const metadata = (p.metadata ?? {}) as Record<string, unknown>;
+        const now = new Date();
+        const doc = {
+          _id: crypto.randomUUID(),
+          type, title, content, metadata,
+          createdBy: uid,
+          createdAt: now,
+        };
+        await (await dbFor('feed')).collection('posts').insertOne(doc);
+        const prof = await serviceClient().from('profiles')
+          .select('id,username,avatar_url,display_name').eq('id', uid).maybeSingle();
+        return ok({ post: {
+          id: doc._id, type, title, content, metadata,
+          created_by: uid, created_at: now,
+          profiles: prof.data ?? { username: 'reader', avatar_url: null },
+        } });
+      }
+
+      case 'posts.delete': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const id = String(p.postId ?? '');
+        if (!isHexId(id)) return fail('A valid postId is required');
+        const feedDb = await dbFor('feed');
+        const res = await feedDb.collection('posts')
+          .deleteOne({ _id: new ObjectId(id), createdBy: uid } as never);
+        if (res.deletedCount === 0) return fail('Post not found (or not yours)', 404);
+        // Delete means delete: every trace of the post goes too.
+        await feedDb.collection('post_comments').deleteMany({ postId: id });
+        await feedDb.collection('post_views').deleteMany({ postId: id });
+        await feedDb.collection('post_reshares').deleteMany({ postId: id });
+        await (await dbFor('social')).collection('post_likes')
+          .deleteMany({ postId: id });
+        return ok({ deleted: true });
+      }
+
+      // ── groups: clubs / communities / organizations / schools ────────────
+      case 'groups.list': {
+        await migrateLegacy(req);
+        const kind = String(p.kind ?? 'clubs');
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return fail('Unknown group kind');
+        const col = (await dbFor('groups')).collection(kind);
+        const uid = await currentUserId(req);
+        let query: Record<string, unknown> = {};
+        if (p.private !== true) {
+          query = uid
+            ? { $or: [{ isPrivate: { $ne: true } }, { ownerId: uid }] }
+            : { isPrivate: { $ne: true } };
+        }
+        const rows = await col.find(query).sort({ createdAt: -1 }).limit(80).toArray();
+        const ownerIds = [...new Set(rows.map((r) => String(r.ownerId)))];
+        const owners = new Map<string, Record<string, unknown>>();
+        if (ownerIds.length > 0) {
+          const profs = await serviceClient().from('profiles')
+            .select('id,username,avatar_url,display_name').in('id', ownerIds);
+          for (const pr of profs.data ?? []) owners.set(String(pr.id), pr as Record<string, unknown>);
+        }
+        const membersCol = (await dbFor('groups')).collection(`${kind}_members`);
+        const counts: number[] = [];
+        for (const r of rows) {
+          counts.push(await membersCol.countDocuments({ groupId: String(r._id) }));
+        }
+        return ok({ groups: rows.map((r, i) => ({
+          id: String(r._id),
+          name: r.name ?? '',
+          description: r.description ?? '',
+          genre_tags: r.genreTags ?? [],
+          is_private: r.isPrivate === true,
+          cover_url: r.coverUrl ?? null,
+          owner_id: r.ownerId ?? null,
+          location: r.location ?? null,
+          website: r.website ?? null,
+          school_type: r.schoolType ?? null,
+          mission: r.mission ?? null,
+          org_type: r.orgType ?? null,
+          created_at: r.createdAt ?? null,
+          owner: owners.get(String(r.ownerId)) ?? null,
+          member_count: counts[i],
+          verified: r.verified === true,
+        })) });
+      }
+
+      case 'groups.get': {
+        await migrateLegacy(req);
+        const kind = String(p.kind ?? 'clubs');
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return fail('Unknown group kind');
+        const id = String(p.groupId ?? '');
+        if (!id) return fail('A valid groupId is required');
+        const doc = await (await dbFor('groups')).collection(kind).findOne({ _id: id } as never);
+        if (!doc) return fail('Not found', 404);
+        const members = await (await dbFor('groups')).collection(`${kind}_members`)
+          .find({ groupId: id }).limit(500).toArray();
+        return ok({ group: { ...doc, _id: String(doc._id) }, members: members.map((m) => ({
+          user_id: m.userId, role: m.role ?? 'member', joined_at: m.joinedAt ?? null,
+        })) });
+      }
+
+      case 'groups.join':
+      case 'groups.leave': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'clubs');
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return fail('Unknown group kind');
+        const id = String(p.groupId ?? '');
+        if (!id) return fail('A valid groupId is required');
+        const members = (await dbFor('groups')).collection(`${kind}_members`);
+        try {
+          await members.createIndex({ groupId: 1, userId: 1 }, { unique: true });
+        } catch { /* index exists */ }
+        if (action === 'groups.join') {
+          try {
+            await members.insertOne({ groupId: id, userId: uid, role: 'member', joinedAt: new Date() });
+          } catch (error) {
+            if (!isDupKey(error)) throw error;
+          }
+        } else {
+          await members.deleteOne({ groupId: id, userId: uid });
+        }
+        return ok({ member: action === 'groups.join', count: await members.countDocuments({ groupId: id }) });
+      }
+
+      case 'groups.create': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'clubs');
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return fail('Unknown group kind');
+        const name = String(p.name ?? '').trim();
+        if (name.length < 2 || name.length > 120) return fail('Name must be 2–120 characters');
+        const now = new Date();
+        const prof = await serviceClient().from('profiles')
+          .select('username,display_name').eq('id', uid).maybeSingle();
+        const doc: Record<string, unknown> = {
+          _id: crypto.randomUUID(),
+          name,
+          description: String(p.description ?? '').slice(0, 4000),
+          ownerId: uid,
+          ownerName: String(prof.data?.display_name ?? prof.data?.username ?? 'Reader').slice(0, 80),
+          isPrivate: p.isPrivate === true,
+          createdAt: now,
+        };
+        if (Array.isArray(p.genreTags)) doc.genreTags = p.genreTags.slice(0, 12).map(String);
+        if (typeof p.coverUrl === 'string' && p.coverUrl.startsWith('http')) doc.coverUrl = p.coverUrl;
+        if (kind === 'organizations') {
+          doc.mission = String(p.mission ?? '').slice(0, 2000);
+          doc.orgType = typeof p.orgType === 'string' ? p.orgType.slice(0, 40) : null;
+        }
+        if (kind === 'schools') {
+          doc.location = typeof p.location === 'string' ? p.location.slice(0, 120) : null;
+          doc.website = typeof p.website === 'string' ? p.website.slice(0, 200) : null;
+          doc.schoolType = typeof p.schoolType === 'string' ? p.schoolType.slice(0, 40) : null;
+        }
+        await (await dbFor('groups')).collection(kind).insertOne(doc);
+        try {
+          await (await dbFor('groups')).collection(`${kind}_members`)
+            .insertOne({ groupId: doc._id, userId: uid, role: 'owner', joinedAt: now });
+        } catch { /* already a member */ }
+        // Every group is born with its announcement forum…
+        try {
+          await (await dbFor('groups')).collection('announcements').insertOne({
+            groupId: doc._id,
+            kind,
+            title: 'Welcome to ' + name,
+            body: 'This is the announcement forum for ' + name +
+              '. Everything posted here reaches every member of the group.',
+            authorId: uid,
+            pinned: true,
+            createdAt: now,
+          });
+        } catch { /* forum already exists */ }
+        // …and its members-only group chat room.
+        try {
+          await ensureClubRoom(kind, String(doc._id), uid);
+        } catch { /* room is created lazily on first open */ }
+        return ok({ id: doc._id });
+      }
+
+      // ── dictionary: Word Nest community layer (own store) ────────────────
+      case 'dict.log': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const term = typeof p.term === 'string' ? p.term.trim().toLowerCase() : '';
+        if (term.length < 2 || term.length > 40) return ok({ logged: false });
+        await (await dbFor('dictionary')).collection('lookups').insertOne({
+          term,
+          userId: uid,
+          createdAt: new Date(),
+        });
+        return ok({ logged: true });
+      }
+
+      // Full-dictionary lookup: a free community API when online, with a
+      // Mongo cache so repeat lookups are instant. The bundled offline
+      // edition always stays available with no network.
+      case 'dict.lookup': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const term = typeof p.word === 'string' ? p.word.trim().toLowerCase() : '';
+        if (!/^[a-z][a-z' -]{0,38}$/.test(term)) return fail('Enter a word to look up');
+        const words = (await dbFor('dictionary')).collection('words');
+        const cached = await words.findOne({ _id: term } as never);
+        if (cached?.data) return ok({ word: cached.data, cached: true });
+        let apiRes: Response;
+        try {
+          apiRes = await fetch(
+            `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term)}`,
+            { signal: AbortSignal.timeout(8000) },
+          );
+        } catch {
+          return ok({ word: null, reason: 'offline' });
+        }
+        if (!apiRes.ok) {
+          return ok({ word: null, reason: apiRes.status === 404 ? 'not_found' : 'unavailable' });
+        }
+        const entries = await apiRes.json().catch(() => null);
+        if (!Array.isArray(entries) || entries.length === 0) {
+          return ok({ word: null, reason: 'not_found' });
+        }
+        const e0 = entries[0] as {
+          word?: string; phonetic?: string;
+          phonetics?: { text?: string }[];
+          meanings?: { partOfSpeech?: string; synonyms?: string[];
+            definitions?: { definition?: string; example?: string }[] }[];
+        };
+        const phonetic = e0.phonetic ?? e0.phonetics?.find((x) => x.text)?.text ?? null;
+        const meanings: { pos: string; defs: { d: string; ex: string | null }[]; syns: string[] }[] = [];
+        for (const m of e0.meanings ?? []) {
+          meanings.push({
+            pos: String(m.partOfSpeech ?? ''),
+            defs: (m.definitions ?? []).slice(0, 4).map((d) => ({
+              d: String(d.definition ?? ''),
+              ex: d.example ? String(d.example) : null,
+            })),
+            syns: (m.synonyms ?? []).slice(0, 6).map(String),
+          });
+        }
+        if (meanings.length === 0) return ok({ word: null, reason: 'not_found' });
+        const word = { word: String(e0.word ?? term), phonetic, meanings };
+        try {
+          await words.insertOne({ _id: term, data: word, fetchedAt: new Date() });
+        } catch {
+          // cached in a parallel request — fine
+        }
+        return ok({ word, cached: false });
+      }
+
+      case 'dict.trending': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const rows = await (await dbFor('dictionary')).collection('lookups')
+          .aggregate([
+            { $match: { createdAt: { $gte: since } } },
+            { $group: { _id: '$term', count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: 8 },
+          ])
+          .toArray();
+        return ok({ trending: rows.map((r) => String(r._id)) });
+      }
+
+      // ── feed: post likes (social store; post ids are Supabase UUIDs) ─────
+      case 'feed.stats': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const raw = p.postIds;
+        const ids = Array.isArray(raw)
+          ? [...new Set(raw.filter((x): x is string => typeof x === 'string' && isUuid(x)))].slice(0, 200)
+          : [];
+        const stats: Record<string, { likeCount: number; likedByMe: boolean }> = {};
+        if (ids.length > 0) {
+          const docs = await (await dbFor('social')).collection('post_likes')
+            .find({ postId: { $in: ids } }, { projection: { postId: 1, userId: 1 } })
+            .toArray();
+          for (const id of ids) stats[id] = { likeCount: 0, likedByMe: false };
+          for (const doc of docs) {
+            const stat = stats[String(doc.postId)];
+            if (!stat) continue;
+            stat.likeCount += 1;
+            if (doc.userId === uid) stat.likedByMe = true;
+          }
+        }
+        return ok({ stats });
+      }
+
+      case 'feed.like':
+      case 'feed.unlike': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isUuid(p.postId)) return fail('A valid postId is required');
+        const postId = p.postId as string;
+        const likes = (await dbFor('social')).collection('post_likes');
+        try {
+          await likes.createIndex({ postId: 1, userId: 1 }, { unique: true });
+        } catch {
+          // index already exists with the same definition
+        }
+        if (action === 'feed.like') {
+          try {
+            await likes.insertOne({ postId, userId: uid, createdAt: new Date() });
+          } catch (error) {
+            if (!isDupKey(error)) throw error; // already liked → no-op
+          }
+        } else {
+          await likes.deleteOne({ postId, userId: uid });
+        }
+        const likeCount = await likes.countDocuments({ postId });
+        return ok({ liked: action === 'feed.like', likeCount });
+      }
+
+      case 'events.list': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const rows = await (await dbFor('feed')).collection('posts')
+          .find({ type: 'event' }).sort({ createdAt: -1 }).limit(100).toArray();
+        const authorIds = [...new Set(rows.map((r) => String(r.createdBy)))];
+        const authors = new Map<string, Record<string, unknown>>();
+        if (authorIds.length > 0) {
+          const profs = await serviceClient().from('profiles')
+            .select('id,username,display_name').in('id', authorIds);
+          for (const pr of profs.data ?? []) authors.set(String(pr.id), pr as Record<string, unknown>);
+        }
+        const ids = rows.map((r) => String(r._id));
+        const col = dbFor('social').collection('event_rsvps');
+        const counts = ids.length
+          ? await col.aggregate([
+              { $match: { postId: { $in: ids } } },
+              { $group: { _id: '$postId', going: { $sum: 1 } } },
+            ]).toArray()
+          : [];
+        const mine = ids.length
+          ? await col.find({ userId: uid, postId: { $in: ids } }).toArray()
+          : [];
+        const countMap = new Map(counts.map((c: any) => [String(c._id), c.going]));
+        const mineSet = new Set(mine.map((m: any) => String(m.postId)));
+        return ok({
+          events: rows.map((r) => ({
+            id: String(r._id),
+            title: r.title ?? 'Untitled event',
+            content: r.content ?? '',
+            metadata: r.metadata ?? {},
+            createdAt: r.createdAt ?? null,
+            author: (() => {
+              const a = authors.get(String(r.createdBy)) as
+                { display_name?: string; username?: string } | undefined;
+              return a?.display_name ?? a?.username ?? 'Reader';
+            })(),
+            going: countMap.get(String(r._id)) ?? 0,
+            rsvped: mineSet.has(String(r._id)),
+          })),
+        });
+      }
+
+      case 'events.rsvp': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const postId = String(p.postId ?? '');
+        if (!postId) return fail('postId is required');
+        const col = dbFor('social').collection('event_rsvps');
+        const existing = await col.findOne({ userId: uid, postId });
+        if (existing) {
+          await col.deleteOne({ _id: existing._id });
+        } else {
+          await col.insertOne({ userId: uid, postId, createdAt: new Date() });
+        }
+        const going = await col.countDocuments({ postId });
+        return ok({ rsvped: !existing, going });
+      }
+
+      // ── streaks: daily reading log (+2 gems on the first log each day) ──
+      case 'streak.get': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const col = dbFor('social').collection('reading_logs');
+        const days = await col.distinct('day', { userId: uid });
+        return ok({
+          ...(computeStreaks(days.map(String))),
+          todayLogged: days.includes(todayUtc()),
+        });
+      }
+
+      case 'streak.log': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const day = todayUtc();
+        const minutes = Math.max(0, Math.min(600, Number(p.minutes ?? 0) || 0));
+        const col = dbFor('social').collection('reading_logs');
+        const existing = await col.findOne({ userId: uid, day });
+        let created = false;
+        if (!existing) {
+          await col.insertOne({ userId: uid, day, minutes: 0, createdAt: new Date() });
+          created = true;
+        }
+        // Every flush adds its own delta (the app resets its stopwatch
+        // after each), capped at 12 tracked hours per day — farm-proof.
+        if (minutes > 0) {
+          const capped = Math.min(minutes, Math.max(0, 720 - Number(existing?.minutes ?? 0)));
+          if (capped > 0) {
+            await col.updateOne({ userId: uid, day }, { $inc: { minutes: capped } });
+          }
+        }
+        let gemsAwarded = 0;
+        if (created) {
+          gemsAwarded = 2;
+          const prof = await serviceClient().from('profiles')
+            .select('gems').eq('id', uid).single();
+          const current = prof.error ? 0 : Number(prof.data?.gems ?? 0);
+          await serviceClient().from('profiles')
+            .update({ gems: current + gemsAwarded }).eq('id', uid);
+          await dbFor('users').collection('gem_ledger').insertOne({
+            userId: uid, delta: gemsAwarded, reason: 'reading_streak', day,
+            createdAt: new Date(),
+          });
+        }
+        const days = await col.distinct('day', { userId: uid });
+        return ok({
+          ...(computeStreaks(days.map(String))),
+          todayLogged: true,
+          created,
+          gemsAwarded,
+        });
+      }
+
+      // ── moderation: club owner approves/denies submitted books ──────────
+      case 'moderation.queue': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const clubId = String(p.clubId ?? '');
+        if (!clubId) return fail('clubId is required');
+        const supa = serviceClient();
+        const club = await supa.from('clubs')
+          .select('id, name, owner_id').eq('id', clubId).single();
+        if (club.error || !club.data) return fail('Club not found', 404);
+        if (club.data.owner_id !== uid) {
+          return fail('Only the club owner can moderate submissions.', 403);
+        }
+        const { data, error } = await supa.from('club_books')
+          .select('id, title, author, description, cover_url, created_at')
+          .eq('club_id', clubId)
+          .eq('moderation_status', 'pending')
+          .order('created_at', { ascending: false });
+        if (error) return fail(error.message, 400);
+        return ok({ clubName: club.data.name, pending: data ?? [] });
+      }
+
+      case 'moderation.decide': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const bookId = String(p.bookId ?? '');
+        const approve = p.approve === true;
+        if (!bookId) return fail('bookId is required');
+        const supa = serviceClient();
+        const book = await supa.from('club_books')
+          .select('id, club_id, added_by, title, moderation_status')
+          .eq('id', bookId).single();
+        if (book.error || !book.data) return fail('Book not found', 404);
+        const club = await supa.from('clubs')
+          .select('owner_id').eq('id', book.data.club_id).single();
+        if (club.error || !club.data) return fail('Club not found', 404);
+        if (club.data.owner_id !== uid) {
+          return fail('Only the club owner can moderate submissions.', 403);
+        }
+        const status = approve ? 'approved' : 'denied';
+        const { error: upErr } = await supa.from('club_books')
+          .update({ moderation_status: status }).eq('id', bookId);
+        if (upErr) return fail(upErr.message, 400);
+        let gemsAwarded = 0;
+        const authorId = book.data.added_by?.toString() ?? '';
+        if (approve && authorId) {
+          gemsAwarded = 10;
+          const prof = await supa.from('profiles')
+            .select('gems').eq('id', authorId).single();
+          const current = prof.error ? 0 : Number(prof.data?.gems ?? 0);
+          await supa.from('profiles')
+            .update({ gems: current + gemsAwarded }).eq('id', authorId);
+          await dbFor('users').collection('gem_ledger').insertOne({
+            userId: authorId, delta: gemsAwarded, reason: 'book_publish',
+            day: todayUtc(), createdAt: new Date(),
+          });
+        }
+        return ok({ status, gemsAwarded });
+      }
+
+      // ── books: browse ────────────────────────────────────────────────────
+      case 'books.list': {
+        const d = await dbFor('books');
+        const limit = Math.min(Number(p.limit ?? 20) || 20, 50);
+        const query: Record<string, unknown> = {};
+        if (p.mine === true) {
+          const uid = await currentUserId(req);
+          if (!uid) return fail('Sign in required', 401);
+          query.authorId = uid;
+          if (p.status === 'draft' || p.status === 'published') query.status = p.status;
+        } else {
+          // v1.1 auto-approves everything; flip to a moderation queue later.
+          query.moderationStatus = p.moderationStatus ?? 'approved';
+          query.status = 'published';
+        }
+        if (typeof p.genre === 'string' && p.genre.trim()) query.genre = p.genre.trim();
+        if (typeof p.clubId === 'string' && isAnyId(p.clubId)) query.clubId = p.clubId;
+        if (typeof p.authorId === 'string' && p.authorId.trim()) query.authorId = p.authorId.trim();
+        const search = typeof p.search === 'string' ? p.search.trim() : '';
+        if (search) {
+          const rx = { $regex: escapeRegex(search), $options: 'i' };
+          query.$or = [{ title: rx }, { authorName: rx }];
+        }
+        if (typeof p.before === 'string' && p.before) {
+          const before = new Date(p.before);
+          if (!isNaN(before.getTime())) query.createdAt = { $lt: before };
+        }
+        const rows = await d.collection('books')
+          .find(query).sort({ createdAt: -1 }).limit(limit * 2 + 4).toArray();
+        // Boosted books surface first (within the same page window).
+        const nowMs = Date.now();
+        const sorted = [...rows].sort((a, b) => {
+          const ab = a.boostUntil ? new Date(String(a.boostUntil)).getTime() : 0;
+          const bb = b.boostUntil ? new Date(String(b.boostUntil)).getTime() : 0;
+          const aBoost = ab > nowMs ? 1 : 0;
+          const bBoost = bb > nowMs ? 1 : 0;
+          if (aBoost !== bBoost) return bBoost - aBoost;
+          return new Date(String(b.createdAt)).getTime() - new Date(String(a.createdAt)).getTime();
+        }).slice(0, limit + 1);
+        const hasMore = sorted.length > limit;
+        return ok({
+          books: sorted.slice(0, limit).map(bookView),
+          nextCursor: hasMore ? sorted[limit - 1].createdAt : null,
+        });
+      }
+
+      case 'books.get': {
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const d = await dbFor('books');
+        const book = await d.collection('books')
+          .findOne({ _id: bookOid(String(p.bookId)) });
+        if (!book) return fail('Book not found', 404);
+        const chapters = await d.collection('chapters')
+          .find({ bookId: String(book._id) })
+          .project({ _id: 0, chapterNumber: 1, title: 1 })
+          .sort({ chapterNumber: 1 })
+          .toArray();
+        return ok({ book: bookView(book as Record<string, unknown>), chapters });
+      }
+
+      case 'books.chapter': {
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const chapterNumber = Number(p.chapterNumber ?? 1) || 1;
+        const d = await dbFor('books');
+        const chapter = await d.collection('chapters')
+          .findOne({ bookId: p.bookId as string, chapterNumber });
+        if (!chapter) return fail('Chapter not found', 404);
+        return ok({
+          chapterNumber: chapter.chapterNumber,
+          title: chapter.title,
+          content: chapter.content ?? '',
+          // Heavy full texts live on the media CDN (MongoDB free-tier
+          // friendly). The reader fetches the URL directly when given.
+          contentUrl: chapter.contentUrl ?? null,
+          contentBytes: chapter.contentBytes ?? null,
+        });
+      }
+
+      // ── books: publish (author writes manuscript → MongoDB) ─────────────
+      case 'books.publish': {
+        {
+          const publisher = await currentUserId(req);
+          if (publisher && await isBanned(publisher)) {
+            return fail('Your account is suspended — contact support');
+          }
+        }
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const title = String(p.title ?? '').trim();
+        if (title.length < 2 || title.length > 200) {
+          return fail('Title must be 2–200 characters');
+        }
+        const bookCode = cleanBookCode(p.bookCode);
+        if (!bookCode) return fail('A Book ID of 3–24 letters, numbers or dashes is required');
+        const asDraft = p.asDraft === true;
+        const rawChapters = Array.isArray(p.chapters) ? p.chapters : [];
+        if (!asDraft && rawChapters.length === 0) return fail('At least one chapter is required');
+        if (rawChapters.length > 300) return fail('Too many chapters (max 300)');
+        let identity;
+        try {
+          identity = await resolveBookIdentity(uid, bookCode, title);
+        } catch (e) {
+          return fail(e instanceof Error ? e.message : 'Could not use that Book ID');
+        }
+        const chapters = rawChapters.map((raw, index) => {
+          const c = (raw ?? {}) as Record<string, unknown>;
+          return {
+            chapterNumber: Number(c.chapterNumber ?? index + 1) || index + 1,
+            title: String(c.title ?? `Chapter ${index + 1}`).slice(0, 200),
+            content: String(c.content ?? '').slice(0, 500_000), // guard 16MB docs
+          };
+        });
+        const d = await dbFor('books');
+        const now = new Date();
+        const book = {
+          title,
+          authorId: uid,
+          authorName: String(p.authorName ?? 'BookNest author').slice(0, 80),
+          description: String(p.description ?? '').slice(0, 5000),
+          genre: typeof p.genre === 'string' && p.genre.trim() ? p.genre.trim() : null,
+          coverUrl: typeof p.coverUrl === 'string' && p.coverUrl.startsWith('http')
+            ? p.coverUrl
+            : null,
+          contentFormat: 'markdown',
+          // v1.1: auto-approved so authors see their work instantly. When
+          // moderation tooling ships, default this back to 'pending'.
+          moderationStatus: 'approved',
+          status: asDraft ? 'draft' : 'published',
+          bookCode,
+          unitType: UNIT_TYPES.includes(String(p.unitType)) ? String(p.unitType) : 'chapter',
+          partNumber: identity.partNumber,
+          sequelOf: identity.sequelOf,
+          sequelRoot: identity.sequelRoot,
+          isRemix: false,
+          chaptersCount: chapters.length,
+          likeCount: 0,
+          bookmarkCount: 0,
+          viewCount: 0,
+          reviewCount: 0,
+          ratingSum: 0,
+          createdAt: now,
+          updatedAt: now,
+        };
+        const inserted = await d.collection('books').insertOne({ ...book });
+        const bookId = inserted.insertedId.toHexString();
+        if (chapters.length > 0) {
+          await d.collection('chapters').insertMany(
+            chapters.map((c) => ({ ...c, bookId })),
+          );
+        }
+        // Real gems: every new part of a story earns the author 25 gems.
+        if (!asDraft) {
+          await grantGems(uid, 25, 'publish');
+        }
+        return ok({
+          id: bookId,
+          partNumber: identity.partNumber,
+          book: bookView({ ...book, _id: inserted.insertedId }),
+        });
+      }
+
+      // ── books: like / bookmark / view (atomic, idempotent) ───────────────
+      case 'books.like':
+      case 'books.bookmark': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const active = action === 'books.like' ? p.liked === true : p.saved === true;
+        const collection = action === 'books.like' ? 'book_likes' : 'book_bookmarks';
+        const counter = action === 'books.like' ? 'likeCount' : 'bookmarkCount';
+        const bookId = p.bookId as string;
+        const d = await dbFor('books');
+        const filter = { bookId, userId: uid };
+        if (active) {
+          try {
+            await (await dbFor('social')).collection(collection).insertOne({ ...filter, createdAt: new Date() });
+          } catch (error) {
+            if (!isDupKey(error)) throw error; // already liked/saved → no-op
+          }
+        } else {
+          const removed = await (await dbFor('social')).collection(collection).deleteOne(filter);
+          if (removed.deletedCount === 0) {
+            const book = await d.collection('books')
+              .findOne({ _id: bookOid(bookId) }, { projection: { [counter]: 1 } });
+            return ok({
+              [action === 'books.like' ? 'liked' : 'saved']: false,
+              [counter]: Math.max(0, Number(book?.[counter] ?? 0)),
+            });
+          }
+        }
+        const updated = await d.collection('books').findOneAndUpdate(
+          { _id: bookOid(bookId) },
+          { $inc: { [counter]: active ? 1 : -1 } },
+          { returnDocument: 'after', projection: { [counter]: 1 } },
+        );
+        const value = Math.max(0, Number(updated?.[counter] ?? 0));
+        if (value === 0) {
+          await d.collection('books')
+            .updateOne({ _id: bookOid(bookId) }, { $set: { [counter]: 0 } });
+        }
+        return ok({
+          [action === 'books.like' ? 'liked' : 'saved']: active,
+          [counter]: value,
+        });
+      }
+
+      case 'books.view': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const bookId = p.bookId as string;
+        const d = await dbFor('books');
+        // Unique (bookId, userId, day) index → one view per user per day.
+        let counted = true;
+        try {
+          await (await dbFor('social')).collection('book_views').insertOne({
+            bookId,
+            userId: uid,
+            day: todayUtc(),
+            createdAt: new Date(),
+          });
+        } catch (error) {
+          if (!isDupKey(error)) throw error;
+          counted = false;
+        }
+        let viewCount = 0;
+        if (counted) {
+          const updated = await d.collection('books').findOneAndUpdate(
+            { _id: bookOid(bookId) },
+            { $inc: { viewCount: 1 } },
+            { returnDocument: 'after', projection: { viewCount: 1 } },
+          );
+          viewCount = Number(updated?.viewCount ?? 1);
+        } else {
+          const book = await d.collection('books')
+            .findOne({ _id: bookOid(bookId) }, { projection: { viewCount: 1 } });
+          viewCount = Number(book?.viewCount ?? 0);
+        }
+        return ok({ counted, viewCount });
+      }
+
+      // ── reviews (one editable review per user per book) ──────────────────
+      case 'reviews.create': {
+        {
+          const reviewer = await currentUserId(req);
+          if (reviewer && await isBanned(reviewer)) {
+            return fail('Your account is suspended — contact support');
+          }
+        }
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const bookId = p.bookId as string;
+        const rating = Math.round(Number(p.rating ?? 0));
+        if (rating < 1 || rating > 5) return fail('Rating must be between 1 and 5');
+        const bodyText = String(p.body ?? '').trim().slice(0, 4000);
+        const d = await dbFor('reviews');
+        const now = new Date();
+        const userName = String(p.displayName ?? 'Reader').slice(0, 80);
+        const existing = await d.collection('reviews')
+          .findOne({ bookId, userId: uid });
+        let ratingDelta = rating;
+        if (existing) {
+          ratingDelta = rating - Number(existing.rating ?? 0);
+          await d.collection('reviews').updateOne(
+            { _id: existing._id },
+            { $set: { rating, body: bodyText, userName, updatedAt: now } },
+          );
+        } else {
+          await d.collection('reviews').insertOne({
+            bookId,
+            userId: uid,
+            userName,
+            rating,
+            body: bodyText,
+            likeCount: 0,
+            createdAt: now,
+            updatedAt: now,
+          });
+          await (await dbFor('books')).collection('books')
+            .updateOne({ _id: bookOid(bookId) }, { $inc: { reviewCount: 1 } });
+        }
+        if (ratingDelta !== 0) {
+          await (await dbFor('books')).collection('books')
+            .updateOne({ _id: bookOid(bookId) }, { $inc: { ratingSum: ratingDelta } });
+        }
+        return ok({ saved: true, edited: existing != null });
+      }
+
+      case 'reviews.list': {
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const limit = Math.min(Number(p.limit ?? 20) || 20, 50);
+        const query: Record<string, unknown> = { bookId: p.bookId as string };
+        if (typeof p.before === 'string' && p.before) {
+          const before = new Date(p.before);
+          if (!isNaN(before.getTime())) query.createdAt = { $lt: before };
+        }
+        const rows = await (await dbFor('reviews')).collection('reviews')
+          .find(query).sort({ createdAt: -1 }).limit(limit + 1).toArray();
+        const hasMore = rows.length > limit;
+        return ok({
+          reviews: rows.slice(0, limit).map((r) => ({
+            id: String(r._id),
+            userId: r.userId,
+            userName: r.userName ?? 'Reader',
+            rating: Number(r.rating ?? 0),
+            body: r.body ?? '',
+            likeCount: Math.max(0, Number(r.likeCount ?? 0)),
+            createdAt: r.createdAt,
+          })),
+          nextCursor: hasMore ? rows[limit - 1].createdAt : null,
+        });
+      }
+
+      // ── social graph ─────────────────────────────────────────────────────
+      case 'social.follow': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const target = typeof p.userId === 'string' ? p.userId : '';
+        if (!target || target === uid) return fail('A valid userId is required');
+        const following = p.following === true;
+        const d = await dbFor('social');
+        let changed = false;
+        if (following) {
+          try {
+            await d.collection('follows').insertOne({
+              followerId: uid,
+              followeeId: target,
+              createdAt: new Date(),
+            });
+            changed = true;
+          } catch (error) {
+            if (!isDupKey(error)) throw error;
+          }
+        } else {
+          const removed = await d.collection('follows')
+            .deleteOne({ followerId: uid, followeeId: target });
+          changed = removed.deletedCount > 0;
+        }
+        if (changed) {
+          await Promise.all([
+            d.collection('user_stats').updateOne(
+              { userId: uid },
+              { $inc: { following: following ? 1 : -1 }, $setOnInsert: { followers: 0, posts: 0 } },
+              { upsert: true },
+            ),
+            d.collection('user_stats').updateOne(
+              { userId: target },
+              { $inc: { followers: following ? 1 : -1 }, $setOnInsert: { following: 0, posts: 0 } },
+              { upsert: true },
+            ),
+          ]);
+        }
+        return ok({ following, ...(await userStats(target)) });
+      }
+
+      // ── direct messages (share flow + chat) ──────────────────────────────
+      case 'dm.ensure': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const peer = typeof p.peerId === 'string' ? p.peerId : '';
+        if (!peer || peer === uid) return fail('A valid peerId is required');
+        const blocked = await blockedSet(uid);
+        if (blocked.has(peer)) return fail('You blocked this reader — unblock them to chat again');
+        const blockedByPeer = await blockedSet(peer);
+        if (blockedByPeer.has(uid)) return fail('This reader is not accepting messages right now');
+        return ok({ conversation: await ensureDirect(uid, peer) });
+      }
+
+      // ── random chat: FIFO pair-up of waiting readers ────────────────────
+      // The queue is short-lived (10-minute stale purge on every join);
+      // matches become ordinary direct conversations (via: 'random') so
+      // every existing chat power — encryption-at-rest, retention, block,
+      // report, delete — applies unchanged.
+      case 'random.join': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (await isBanned(uid)) return fail('Your account is suspended — contact support');
+        if (await hitLimit(uid, 'random', 6, 60_000)) {
+          return fail('The pair-up is catching its breath — try again in a few seconds.', 429);
+        }
+        const u = await dbFor('users');
+        const queue = u.collection('random_queue');
+        const now = new Date();
+        await queue.deleteMany({
+          joinedAt: { $lt: new Date(now.getTime() - 10 * 60 * 1000) },
+        });
+        // Already seated? Keep the original timestamp — no churn spam.
+        const seated = await queue.findOne({ _id: uid });
+        if (seated) return ok({ matched: false });
+        const [myBlocked, waiting] = await Promise.all([
+          blockedSet(uid),
+          queue.find({ _id: { $ne: uid } })
+            .sort({ joinedAt: 1 }).limit(30).toArray(),
+        ]);
+        for (const w of waiting) {
+          const other = String(w._id);
+          if (myBlocked.has(other)) continue;
+          const otherBlocked = await blockedSet(other);
+          if (otherBlocked.has(uid)) continue;
+          await queue.deleteMany({ _id: { $in: [uid, other] } });
+          const conversation = await ensureDirect(uid, other);
+          try {
+            await (await dbFor('chats')).collection('conversations')
+              .updateOne(
+                { _id: new ObjectId(String(conversation.id)) },
+                { $set: { via: 'random', randomAt: now } });
+          } catch (_) { /* the chat works even if the stamp races */ }
+          return ok({ matched: true, conversation });
+        }
+        await queue.updateOne(
+          { _id: uid },
+          { $set: { joinedAt: now } },
+          { upsert: true });
+        return ok({ matched: false });
+      }
+
+      case 'random.status': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const u = await dbFor('users');
+        const still = await u.collection('random_queue').findOne({ _id: uid });
+        if (still) return ok({ matched: false, waiting: true });
+        const since = new Date(Date.now() - 5 * 60 * 1000);
+        const room = await (await dbFor('chats')).collection('conversations')
+          .findOne({
+            via: 'random',
+            memberIds: uid,
+            $or: [{ randomAt: { $gte: since } }, { createdAt: { $gte: since } }],
+          } as never,
+            { sort: { _id: -1 } } as never);
+        if (!room) return ok({ matched: false, waiting: true });
+        return ok({ matched: true, conversation: conversationView(room, uid) });
+      }
+
+      case 'random.leave': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        await (await dbFor('users')).collection('random_queue')
+          .deleteOne({ _id: uid });
+        return ok({ left: true });
+      }
+
+      case 'dm.send': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (await isBanned(uid)) return fail('Your account is suspended — contact support');
+        if (await hitLimit(uid, 'msg', 25, 10_000)) {
+          return fail('Easy there — take a short breather between messages.', 429);
+        }
+        const d = await dbFor('chats');
+        const type = ['text', 'book_share', 'image', 'file', 'voice', 'emoji', 'video']
+          .includes(String(p.type)) ? String(p.type) : 'text';
+        const text = String(p.text ?? '').trim().slice(0, 4000);
+        if (type === 'text' && !text) return fail('Message text is empty');
+        const bookId = typeof p.bookId === 'string' ? p.bookId.slice(0, 64) : null;
+        const bookTitle = typeof p.bookTitle === 'string' ? p.bookTitle.slice(0, 200) : null;
+        const mediaUrl = typeof p.mediaUrl === 'string' && p.mediaUrl.startsWith('http')
+          ? p.mediaUrl
+          : null; // Cloudinary/R2 URLs only — never raw media in the database.
+        const fileName = typeof p.fileName === 'string' && p.fileName.trim()
+          ? p.fileName.trim().slice(0, 200)
+          : null;
+        const fileSize = Number.isFinite(Number(p.fileSize))
+          ? Math.max(0, Math.round(Number(p.fileSize)))
+          : null;
+
+        let conversationId = typeof p.conversationId === 'string' ? p.conversationId : '';
+        if (!isHexId(conversationId)) {
+          const peer = typeof p.peerId === 'string' ? p.peerId : '';
+          if (!peer || peer === uid) return fail('conversationId or peerId is required');
+          const blockedNow = await blockedSet(uid);
+          if (blockedNow.has(peer)) return fail('You blocked this reader — unblock them to chat again');
+          const blockedByPeer = await blockedSet(peer);
+          if (blockedByPeer.has(uid)) return fail('This reader is not accepting messages right now');
+          conversationId = String((await ensureDirect(uid, peer)).id);
+        }
+        const conversation = await d.collection('conversations')
+          .findOne({ _id: new ObjectId(conversationId) });
+        if (!conversation || !(conversation.memberIds as string[]).includes(uid)) {
+          return fail('Conversation not found', 404);
+        }
+
+        const now = new Date();
+        const replyTo = typeof p.replyToId === 'string'
+          ? await buildReplyPreview(conversationId, p.replyToId)
+          : null;
+        const message = {
+          conversationId,
+          senderId: uid,
+          type,
+          text,
+          bookId,
+          bookTitle,
+          mediaUrl,
+          fileName,
+          fileSize,
+          forwarded: p.forwarded === true,
+          animated: type === 'emoji' && p.animated === true,
+          reactions: {},
+          replyTo,
+          deletedFor: [],
+          deletedForEveryone: false,
+          readBy: [uid],
+          createdAt: now,
+        };
+        const inserted = await d.collection('messages').insertOne({ ...message });
+        // End-to-end encrypted messages arrive as sealed text — the
+        // reader's app supplies a friendly preview so the chat list stays
+        // human without us ever seeing the words.
+        const preview = typeof p.previewText === 'string' && p.previewText.trim()
+          ? p.previewText.trim()
+          : type === 'book_share'
+            ? `📖 ${bookTitle ?? 'Shared a book'}`
+            : type === 'text'
+              ? text
+              : 'Sent an attachment';
+        await d.collection('conversations').updateOne(
+          { _id: conversation._id },
+          { $set: { updatedAt: now, lastMessage: { text: preview.slice(0, 140), senderId: uid, type, createdAt: now } } },
+        );
+        const peer = (conversation.memberIds as string[]).find((m) => m !== uid);
+        if (peer) {
+          await (await dbFor('notifications')).collection('notifications').insertOne({
+            userId: peer,
+            type: 'dm',
+            actorId: uid,
+            conversationId,
+            bookId,
+            text: preview.slice(0, 140),
+            read: false,
+            createdAt: now,
+          });
+          const senderProfile = await serviceClient().from('profiles')
+            .select('display_name,username').eq('id', uid).maybeSingle();
+          const senderName = String(
+            senderProfile.data?.display_name ??
+            senderProfile.data?.username ?? 'A reader');
+          void sendPush(peer, senderName, preview.slice(0, 120), {
+            route: `/chat/${conversationId}?peer=${uid}`,
+            kind: 'dm',
+          });
+        }
+        return ok({
+          conversationId,
+          messageId: String(inserted.insertedId),
+          message: { id: String(inserted.insertedId), ...message },
+        });
+      }
+
+      case 'dm.list': {
+        const uid =
+          (await currentUserId(req)) ?? await userIdFromLinkPass(p.linkPass);
+        if (!uid) return fail('Sign in required', 401);
+        void sweepOldMessages();
+        const rows = await (await dbFor('chats')).collection('conversations')
+          .find({ memberIds: uid, clubKey: { $exists: false } })
+          .sort({ updatedAt: -1 })
+          .limit(50)
+          .toArray();
+        return ok({ conversations: rows.map((c) => conversationView(c as Record<string, unknown>, uid)) });
+      }
+
+      case 'dm.messages': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        void sweepOldMessages();
+        const conversationId = typeof p.conversationId === 'string' ? p.conversationId : '';
+        if (!isHexId(conversationId)) return fail('A valid conversationId is required');
+        const d = await dbFor('chats');
+        const conversation = await d.collection('conversations')
+          .findOne({ _id: new ObjectId(conversationId) });
+        if (!conversation || !(conversation.memberIds as string[]).includes(uid)) {
+          return fail('Conversation not found', 404);
+        }
+        const limit = Math.min(Number(p.limit ?? 50) || 50, 100);
+        const query: Record<string, unknown> = { conversationId };
+        if (typeof p.before === 'string' && isHexId(p.before)) {
+          query._id = { $lt: new ObjectId(p.before as string) };
+        }
+        // Blocked readers' messages stay invisible (own messages always show).
+        const hidden = await blockedSet(uid);
+        if (hidden.size > 0) query.senderId = { $nin: [...hidden] };
+        const rows = await d.collection('messages')
+          .find(query).sort({ _id: -1 }).limit(limit + 1).toArray();
+        const hasMore = rows.length > limit;
+        const uid2 = uid;
+        return ok({
+          messages: rows.slice(0, limit).reverse()
+            .filter((m) => !((m.deletedFor as string[]) ?? []).includes(uid2))
+            .map(messageView),
+          nextCursor: hasMore ? String(rows[limit - 1]._id) : null,
+        });
+      }
+
+      // ── chat: club group rooms (chats store; membership-gated) ──────────
+      case 'chat.ensure': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'clubs');
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return fail('Unknown group kind');
+        const clubId = String(p.clubId ?? '');
+        if (!clubId) return fail('A valid clubId is required');
+        if (!(await isClubMember(kind, clubId, uid))) {
+          return fail('Join this group to open its chat', 403);
+        }
+        const unitId = typeof p.unitId === 'string' ? p.unitId : '';
+        const chanName = typeof p.name === 'string' ? p.name.trim().slice(0, 48) : '';
+        if (unitId) {
+          if (!isHexId(unitId)) return fail('A valid unitId is required');
+          if (!(await isUnitMember(unitId, uid))) {
+            return fail('Join this department to open its chat', 403);
+          }
+        }
+        const room = await ensureClubRoom(kind, clubId, uid, unitId, chanName);
+        if (!room) return fail('Could not open the chat — please try again', 503);
+        let pinnedMessage: Record<string, unknown> | null = null;
+        const pinnedId = String(room.pinnedMessageId ?? '');
+        if (pinnedId && isHexId(pinnedId)) {
+          const m = await loadMessage(pinnedId);
+          if (m && String(m.conversationId) === String(room._id)) {
+            pinnedMessage = messageView(m);
+          }
+        }
+        const canPin = await isGroupManager(kind, clubId, uid);
+        return ok({ conversation: {
+          id: String(room._id),
+          type: 'club',
+          title: room.title ?? 'Group chat',
+        }, pinnedMessage, canPin });
+      }
+
+      case 'chat.send': {
+        {
+          const senderId = await currentUserId(req);
+          if (senderId && await isBanned(senderId)) {
+            return fail('Your account is suspended — contact support');
+          }
+        }
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (await hitLimit(uid, 'msg', 25, 10_000)) {
+          return fail('Easy there — take a short breather between messages.', 429);
+        }
+        const d = await dbFor('chats');
+        const conversationId = typeof p.conversationId === 'string' ? p.conversationId : '';
+        if (!isHexId(conversationId)) return fail('A valid conversationId is required');
+        const room = await d.collection('conversations')
+          .findOne({ _id: new ObjectId(conversationId) });
+        if (!room || room.type !== 'club') return fail('Conversation not found', 404);
+        if (!(await isRoomMember(room, uid))) {
+          return fail('Join this group to chat', 403);
+        }
+        const type = ['text', 'image', 'file', 'voice', 'emoji', 'video']
+          .includes(String(p.type))
+          ? String(p.type)
+          : 'text';
+        const text = String(p.text ?? '').trim().slice(0, 4000);
+        if (type === 'text' && !text) return fail('Message text is empty');
+        const mediaUrl = typeof p.mediaUrl === 'string' && p.mediaUrl.startsWith('http')
+          ? p.mediaUrl
+          : null; // Cloudinary/R2 URLs only — never raw media in the database.
+        const fileName = typeof p.fileName === 'string' && p.fileName.trim()
+          ? p.fileName.trim().slice(0, 200)
+          : null;
+        const fileSize = Number.isFinite(Number(p.fileSize))
+          ? Math.max(0, Math.round(Number(p.fileSize)))
+          : null;
+        const now = new Date();
+        const replyTo = typeof p.replyToId === 'string'
+          ? await buildReplyPreview(conversationId, p.replyToId)
+          : null;
+        const message = {
+          conversationId,
+          senderId: uid,
+          type,
+          text,
+          mediaUrl,
+          fileName,
+          fileSize,
+          forwarded: p.forwarded === true,
+          animated: type === 'emoji' && p.animated === true,
+          reactions: {},
+          replyTo,
+          deletedFor: [],
+          deletedForEveryone: false,
+          readBy: [uid],
+          createdAt: now,
+        };
+        const inserted = await d.collection('messages').insertOne({ ...message });
+        const clubPreview = typeof p.previewText === 'string' &&
+            p.previewText.trim()
+          ? p.previewText.trim()
+          : (type === 'text' ? text : 'Sent an attachment');
+        await d.collection('conversations').updateOne(
+          { _id: room._id as unknown as ObjectId },
+          { $set: { updatedAt: now, lastMessage: {
+            text: clubPreview.slice(0, 140),
+            senderId: uid, type, createdAt: now,
+          } } },
+        );
+        // Push the room (capped) — a club is bigger than one chat.
+        {
+          const others = ((room.memberIds as string[]) ?? [])
+            .filter((m) => m !== uid).slice(0, 20);
+          if (others.length > 0) {
+            const roomKind = String(room.kind ?? 'clubs');
+            const roomClubId = String(room.clubId ?? '');
+            const clubDoc = roomClubId
+              ? await (await dbFor('groups')).collection(roomKind)
+                  .findOne({ _id: roomClubId } as never)
+              : null;
+            const roomName = String(clubDoc?.name ?? 'Group chat');
+            const senderProfile = await serviceClient().from('profiles')
+              .select('display_name,username').eq('id', uid).maybeSingle();
+            const senderName = String(
+              senderProfile.data?.display_name ??
+              senderProfile.data?.username ?? 'A reader');
+            for (const memberId of others) {
+              void sendPush(memberId, `${senderName} · ${roomName}`,
+                clubPreview.slice(0, 120), {
+                  route: `/club-chat?kind=${roomKind}&clubId=${roomClubId}`,
+                  kind: 'club',
+                });
+            }
+          }
+        }
+        return ok({
+          conversationId,
+          messageId: String(inserted.insertedId),
+          message: { id: String(inserted.insertedId), ...message },
+        });
+      }
+
+      case 'chat.messages': {
+        void sweepOldMessages();
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const d = await dbFor('chats');
+        const conversationId = typeof p.conversationId === 'string' ? p.conversationId : '';
+        if (!isHexId(conversationId)) return fail('A valid conversationId is required');
+        const room = await d.collection('conversations')
+          .findOne({ _id: new ObjectId(conversationId) });
+        if (!room || room.type !== 'club') return fail('Conversation not found', 404);
+        if (!(await isRoomMember(room, uid))) {
+          return fail('Join this group to read the chat', 403);
+        }
+        const limit = Math.min(Number(p.limit ?? 60) || 60, 100);
+        const query: Record<string, unknown> = { conversationId };
+        if (typeof p.before === 'string' && isHexId(p.before)) {
+          query._id = { $lt: new ObjectId(p.before as string) };
+        }
+        const rows = await d.collection('messages')
+          .find(query).sort({ _id: -1 }).limit(limit + 1).toArray();
+        const hasMore = rows.length > limit;
+        return ok({
+          messages: rows.slice(0, limit).reverse()
+            .filter((m) => !((m.deletedFor as string[]) ?? []).includes(uid))
+            .map(messageView),
+          nextCursor: hasMore ? String(rows[limit - 1]._id) : null,
+        });
+      }
+
+      // ── message toolkit: react / delete / read receipts ──────────────────
+      case 'chats.list': {
+        const uid =
+          (await currentUserId(req)) ?? await userIdFromLinkPass(p.linkPass);
+        void sweepOldMessages();
+        if (!uid) return fail('Sign in required', 401);
+        const d = await dbFor('chats');
+        const rows = await d.collection('conversations')
+          .find({ memberIds: uid, clubKey: { $exists: true } })
+          .sort({ updatedAt: -1 })
+          .limit(50)
+          .toArray();
+        const names = new Map<string, string>();
+        const clubIds = rows.map((r) => String(r.clubId));
+        for (const kind of GROUP_KINDS) {
+          const ids = rows.filter((r) => r.kind === kind).map((r) => String(r.clubId));
+          if (ids.length === 0) continue;
+          const docs = await (await dbFor('groups')).collection(kind)
+            .find({ _id: { $in: ids.map((i) => new ObjectId(i)) } })
+            .project({ name: 1 })
+            .toArray();
+          for (const doc of docs) names.set(String(doc._id), String(doc.name ?? 'Group'));
+        }
+        return ok({
+          rooms: rows.map((r) => ({
+            conversationId: String(r._id),
+            kind: String(r.kind ?? 'clubs'),
+            clubId: String(r.clubId ?? ''),
+            title: names.get(String(r.clubId ?? '')) ?? 'Group chat',
+            lastMessage: r.lastMessage ?? null,
+          })),
+        });
+      }
+
+      case 'dm.react': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const emoji = String(p.emoji ?? '').trim().slice(0, 24);
+        if (!emoji) return fail('An emoji is required');
+        return applyReaction(uid, String(p.messageId ?? ''), emoji, async () => {
+          const m = await loadMessage(String(p.messageId ?? ''));
+          if (!m) return false;
+          const conversation = await (await dbFor('chats')).collection('conversations')
+            .findOne({ _id: m.conversationId as unknown as ObjectId });
+          return !!conversation && !!(conversation.memberIds as string[]).includes(uid);
+        });
+      }
+
+      case 'chat.pin': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const m = await loadMessage(String(p.messageId ?? ''));
+        if (!m) return fail('Message not found', 404);
+        const room = await (await dbFor('chats')).collection('conversations')
+          .findOne({ _id: m.conversationId as unknown as ObjectId });
+        if (!room || room.type !== 'club') return fail('Conversation not found', 404);
+        if (!(await isGroupManager(String(room.kind), String(room.clubId), uid))) {
+          return fail('Only owners and deputies can pin messages', 403);
+        }
+        const pinned = p.pinned !== false;
+        await (await dbFor('chats')).collection('conversations')
+          .updateOne({ _id: room._id } as never,
+            { $set: { pinnedMessageId: pinned ? String(m._id) : null } });
+        return ok({ pinnedMessageId: pinned ? String(m._id) : null });
+      }
+
+      case 'chat.react': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const emoji = String(p.emoji ?? '').trim().slice(0, 24);
+        if (!emoji) return fail('An emoji is required');
+        return applyReaction(uid, String(p.messageId ?? ''), emoji, async () => {
+          const m = await loadMessage(String(p.messageId ?? ''));
+          if (!m) return false;
+          const room = await (await dbFor('chats')).collection('conversations')
+            .findOne({ _id: m.conversationId as unknown as ObjectId });
+          if (!room || room.type !== 'club') return false;
+          return isRoomMember(room, uid);
+        });
+      }
+
+      case 'dm.deleteMessage': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        return applyDelete(uid, String(p.messageId ?? ''), p.forEveryone === true, async () => {
+          const m = await loadMessage(String(p.messageId ?? ''));
+          if (!m) return false;
+          const conversation = await (await dbFor('chats')).collection('conversations')
+            .findOne({ _id: m.conversationId as unknown as ObjectId });
+          return !!conversation && !!(conversation.memberIds as string[]).includes(uid);
+        });
+      }
+
+      case 'chat.deleteMessage': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        return applyDelete(uid, String(p.messageId ?? ''), p.forEveryone === true, async () => {
+          const m = await loadMessage(String(p.messageId ?? ''));
+          if (!m) return false;
+          const room = await (await dbFor('chats')).collection('conversations')
+            .findOne({ _id: m.conversationId as unknown as ObjectId });
+          if (!room || room.type !== 'club') return false;
+          return isRoomMember(room, uid);
+        });
+      }
+
+      case 'dm.read': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const conversationId = typeof p.conversationId === 'string' ? p.conversationId : '';
+        if (!isHexId(conversationId)) return fail('A valid conversationId is required');
+        return applyRead(uid, conversationId, async () => {
+          const conversation = await (await dbFor('chats')).collection('conversations')
+            .findOne({ _id: new ObjectId(conversationId) });
+          return !!conversation && !!(conversation.memberIds as string[]).includes(uid);
+        });
+      }
+
+      case 'chat.read': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const conversationId = typeof p.conversationId === 'string' ? p.conversationId : '';
+        if (!isHexId(conversationId)) return fail('A valid conversationId is required');
+        return applyRead(uid, conversationId, async () => {
+          const room = await (await dbFor('chats')).collection('conversations')
+            .findOne({ _id: new ObjectId(conversationId) });
+          if (!room || room.type !== 'club') return false;
+          return isRoomMember(room, uid);
+        });
+      }
+
+      // ── reader: immersive reading progress (social store) ────────────────
+      case 'reader.progress.save': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const bookId = typeof p.bookId === 'string' ? p.bookId.slice(0, 64) : '';
+        if (!bookId || !isAnyId(bookId)) return fail('A valid bookId is required');
+        const chapterNumber = Math.max(1, Math.min(5000, Number(p.chapterNumber ?? 1) || 1));
+        const scroll = Math.max(0, Math.min(1, Number(p.scroll ?? 0) || 0));
+        const col = (await dbFor('social')).collection('reader_progress');
+        try {
+          await col.createIndex({ userId: 1, bookId: 1 }, { unique: true });
+        } catch { /* index exists */ }
+        // Optional bookmark surgery (the reader's ribbon list): replace,
+        // or add/remove a single entry when bookId carries one.
+        let bookmarks: unknown = undefined;
+        if (Array.isArray(p.bookmarks)) {
+          bookmarks = p.bookmarks.slice(0, 60).map((b) => ({
+            id: String((b as Record<string, unknown>).id ?? ''),
+            chapterNumber: Math.max(1, Math.min(
+              5000, Number((b as Record<string, unknown>).chapterNumber ?? 1) || 1)),
+            scroll: Math.max(0, Math.min(
+              1, Number((b as Record<string, unknown>).scroll ?? 0) || 0)),
+            label: String((b as Record<string, unknown>).label ?? '')
+              .slice(0, 120),
+            at: (b as Record<string, unknown>).at ?? new Date(),
+          }));
+        }
+        const setOp: Record<string, unknown> = {
+          chapterNumber, scroll, updatedAt: new Date(),
+        };
+        if (bookmarks !== undefined) setOp.bookmarks = bookmarks;
+        if (typeof p.removeBookmark === 'string' && p.removeBookmark) {
+          const existing = await col.findOne({ userId: uid, bookId });
+          const list = Array.isArray(existing?.bookmarks)
+            ? existing!.bookmarks : [];
+          setOp.bookmarks = (list as unknown[]).filter(
+            (b) => String((b as Record<string, unknown>).id) !==
+              p.removeBookmark);
+        }
+        try {
+          await col.updateOne(
+            { userId: uid, bookId },
+            { $set: setOp },
+          );
+        } catch {
+          await col.insertOne({
+            userId: uid, bookId, ...setOp,
+          });
+        }
+        return ok({ saved: true });
+      }
+
+      case 'reader.progress.get': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const bookId = typeof p.bookId === 'string' ? p.bookId.slice(0, 64) : '';
+        if (!bookId || !isAnyId(bookId)) return fail('A valid bookId is required');
+        const doc = await (await dbFor('social')).collection('reader_progress')
+          .findOne({ userId: uid, bookId });
+        return ok({ progress: doc ? {
+          chapterNumber: doc.chapterNumber ?? 1,
+          scroll: doc.scroll ?? 0,
+          updatedAt: doc.updatedAt ?? null,
+        } : null });
+      }
+
+      case 'reader.progress.list': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const rows = await (await dbFor('social')).collection('reader_progress')
+          .find({ userId: uid }).sort({ updatedAt: -1 }).limit(12).toArray();
+        const booksDb = (await dbFor('books')).collection('books');
+        const items = [];
+        for (const r of rows) {
+          const book = await booksDb.findOne(
+            { _id: bookOid(String(r.bookId)) } as never,
+            { projection: { title: 1, authorName: 1, coverUrl: 1, chaptersCount: 1 } },
+          );
+          if (!book) continue;
+          const chaptersCount = Math.max(1, Number(book.chaptersCount ?? 1));
+          const within = Math.max(0, Math.min(1, Number(r.scroll ?? 0)));
+          const percent = Math.min(100,
+            Math.round((((r.chapterNumber ?? 1) - 1 + within) / chaptersCount) * 100));
+          items.push({
+            bookId: String(r.bookId),
+            title: book.title ?? 'Untitled',
+            author: book.authorName ?? 'Unknown',
+            coverUrl: book.coverUrl ?? null,
+            chaptersCount,
+            chapterNumber: r.chapterNumber ?? 1,
+            percent,
+            updatedAt: r.updatedAt ?? null,
+          });
+        }
+        return ok({ items });
+      }
+
+      // ── wrapped + finish bonus (delight layer) ───────────────────────────
+      case 'wrapped.get': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const social = await dbFor('social');
+        const days: string[] = await social.collection('reading_logs')
+          .distinct('day', { userId: uid });
+        const minutesRows = await social.collection('reading_logs').aggregate([
+          { $match: { userId: uid } },
+          { $group: { _id: null, minutes: { $sum: '$minutes' } } },
+        ]).toArray();
+        const minutes = Number(minutesRows[0]?.minutes ?? 0) || 0;
+        const streaks = computeStreaks(days.map(String));
+        const gemsRows = await (await dbFor('users')).collection('gem_ledger')
+          .aggregate([
+            { $match: { userId: uid } },
+            { $group: { _id: null, gems: { $sum: '$delta' } } },
+          ]).toArray();
+        const gemsEarned = Number(gemsRows[0]?.gems ?? 0) || 0;
+        const progressDocs = await social.collection('reader_progress')
+          .find({ userId: uid }, { projection: { bookId: 1, chapterNumber: 1 } })
+          .limit(200).toArray();
+        const booksCol = (await dbFor('books')).collection('books');
+        let booksFinished = 0;
+        let chaptersOpened = 0;
+        for (const d of progressDocs) {
+          const chapterNumber = Math.max(1, Number(d.chapterNumber ?? 1));
+          chaptersOpened += chapterNumber;
+          const book = await booksCol.findOne(
+            { _id: bookOid(String(d.bookId)) } as never,
+            { projection: { chaptersCount: 1 } },
+          );
+          if (!book) continue;
+          const chaptersCount = Math.max(1, Number(book.chaptersCount ?? 1));
+          if (chapterNumber >= chaptersCount) booksFinished += 1;
+        }
+        const wordsExplored = await (await dbFor('dictionary'))
+          .collection('lookups').countDocuments({ userId: uid });
+        const storiesShared = await (await dbFor('feed'))
+          .collection('posts').countDocuments({ createdBy: uid });
+        const groupsDb = await dbFor('groups');
+        let groupsJoined = 0;
+        for (const kind of GROUP_KINDS) {
+          groupsJoined += await groupsDb.collection(`${kind}_members`)
+            .countDocuments({ userId: uid });
+        }
+        const myBooks = await booksCol.find({ authorId: uid },
+          { projection: { _id: 1 } }).limit(500).toArray();
+        let chaptersPublished = 0;
+        for (const b of myBooks) {
+          chaptersPublished += await (await dbFor('books'))
+            .collection('chapters').countDocuments({ bookId: String(b._id) });
+        }
+        return ok({ wrapped: {
+          minutesRead: minutes,
+          daysRead: days.length,
+          currentStreak: streaks.current,
+          longestStreak: streaks.longest,
+          gemsEarned,
+          booksOpened: progressDocs.length,
+          booksFinished,
+          chaptersOpened,
+          wordsExplored,
+          storiesShared,
+          groupsJoined,
+          chaptersPublished,
+        } });
+      }
+
+      case 'reader.finish': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const bookId = typeof p.bookId === 'string' ? p.bookId.slice(0, 64) : '';
+        if (!bookId || !isAnyId(bookId)) return fail('A valid bookId is required');
+        const book = await (await dbFor('books')).collection('books')
+          .findOne({ _id: bookOid(bookId) } as never,
+            { projection: { chaptersCount: 1 } });
+        if (!book) return fail('Book not found', 404);
+        const progress = await (await dbFor('social')).collection('reader_progress')
+          .findOne({ userId: uid, bookId });
+        const chaptersCount = Math.max(1, Number(book.chaptersCount ?? 1));
+        if (!progress || Number(progress.chapterNumber ?? 1) < chaptersCount) {
+          return fail('Finish the last chapter first', 400);
+        }
+        const ledger = (await dbFor('users')).collection('gem_ledger');
+        const existing = await ledger.findOne({
+          userId: uid, reason: 'book_finished', bookId,
+        });
+        let gemsAwarded = 0;
+        if (!existing) {
+          gemsAwarded = 5;
+          await ledger.insertOne({
+            userId: uid, reason: 'book_finished', bookId,
+            delta: gemsAwarded, createdAt: new Date(),
+          });
+          const prof = await serviceClient().from('profiles')
+            .select('gems').eq('id', uid).single();
+          const current = prof.error ? 0 : Number(prof.data?.gems ?? 0);
+          await serviceClient().from('profiles')
+            .update({ gems: current + gemsAwarded }).eq('id', uid);
+        }
+        return ok({ finished: true, gemsAwarded });
+      }
+
+      // ── notifications ────────────────────────────────────────────────────
+      case 'notifications.list': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const limit = Math.min(Number(p.limit ?? 30) || 30, 50);
+        const rows = await (await dbFor('notifications')).collection('notifications')
+          .find({ userId: uid }).sort({ createdAt: -1 }).limit(limit).toArray();
+        return ok({
+          notifications: rows.map((n) => ({
+            id: String(n._id),
+            type: n.type,
+            actorId: n.actorId ?? null,
+            conversationId: n.conversationId ?? null,
+            bookId: n.bookId ?? null,
+            text: n.text ?? '',
+            read: n.read === true,
+            createdAt: n.createdAt,
+          })),
+        });
+      }
+
+      case 'notifications.read': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const d = await dbFor('notifications');
+        if (p.all === true) {
+          await d.collection('notifications')
+            .updateMany({ userId: uid, read: { $ne: true } }, { $set: { read: true } });
+          return ok({ read: 'all' });
+        }
+        if (!isHexId(p.notificationId)) return fail('notificationId or all:true required');
+        await d.collection('notifications').updateOne(
+          { _id: new ObjectId(p.notificationId as string), userId: uid },
+          { $set: { read: true } },
+        );
+        return ok({ read: p.notificationId });
+      }
+
+      // ── users & social graph reads ───────────────────────────────────────
+      case 'users.get': {
+        const target = typeof p.userId === 'string' ? p.userId : '';
+        if (!target) return fail('A valid userId is required');
+        return ok({ userId: target, ...(await userStats(target)) });
+      }
+
+      case 'social.list': {
+        const target = typeof p.userId === 'string' ? p.userId : '';
+        if (!target) return fail('A valid userId is required');
+        const type = p.type === 'following' ? 'following' : 'followers';
+        const d = await dbFor('social');
+        const query = type === 'followers'
+          ? { followeeId: target }
+          : { followerId: target };
+        const rows = await d.collection('follows')
+          .find(query).sort({ createdAt: -1 }).limit(200).toArray();
+        const userIds = rows.map((r) =>
+          type === 'followers' ? r.followerId : r.followeeId);
+        return ok({ type, userIds });
+      }
+
+      // ── reader profile: country, gender, languages (chats store: users) ──
+      case 'users.profile.get': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const target = typeof p.userId === 'string' && isHexId(p.userId) ? p.userId : uid;
+        const row = await (await dbFor('users')).collection('user_prefs')
+          .findOne({ userId: target });
+        const isSelf = target === uid;
+        return ok({
+          profile: {
+            country: row?.country ?? null,
+            countryCode: row?.countryCode ?? null,
+            gender: row?.gender ?? null,
+            languages: isSelf ? (row?.languages ?? []) : [],
+            preferredLanguage: isSelf ? (row?.preferredLanguage ?? null) : null,
+          },
+        });
+      }
+
+      case 'users.profile.save': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const updates: Record<string, unknown> = { updatedAt: new Date() };
+        if (typeof p.country === 'string' && p.country.trim()) updates.country = p.country.trim().slice(0, 80);
+        if (typeof p.countryCode === 'string' && /^[A-Za-z]{2}$/.test(p.countryCode)) updates.countryCode = p.countryCode.toUpperCase();
+        if (['female', 'male', 'nonbinary', 'prefer_not_to_say'].includes(String(p.gender))) {
+          updates.gender = String(p.gender);
+        }
+        if (p.birthYear != null && Number.isFinite(Number(p.birthYear))) {
+          const by = Number(p.birthYear);
+          const thisYear = new Date().getUTCFullYear();
+          if (by >= 1900 && by <= thisYear - 5) updates.birthYear = by;
+        }
+        if (Array.isArray(p.languages)) {
+          const langs = (p.languages as unknown[])
+            .filter((l): l is { code: string; level: string } =>
+              !!l && typeof l === 'object' &&
+              typeof (l as { code?: unknown }).code === 'string' &&
+              ['native', 'fluent', 'intermediate', 'basic'].includes(String((l as { level?: unknown }).level)))
+            .map((l) => ({ code: String(l.code).slice(0, 8), level: String(l.level) }))
+            .slice(0, 8);
+          updates.languages = langs;
+          const rank: Record<string, number> = { native: 3, fluent: 2, intermediate: 1, basic: 0 };
+          const best = [...langs].sort((a, b) => rank[b.level] - rank[a.level])[0];
+          if (best) updates.preferredLanguage = best.code;
+        }
+        if (typeof p.preferredLanguage === 'string' && /^[a-z]{2}(-[A-Za-z]{2,4})?$/.test(p.preferredLanguage)) {
+          updates.preferredLanguage = p.preferredLanguage; // explicit override wins
+        }
+        await (await dbFor('users')).collection('user_prefs').updateOne(
+          { userId: uid },
+          { $set: updates, $setOnInsert: { userId: uid } },
+          { upsert: true },
+        );
+        return ok({ saved: true, preferredLanguage: updates.preferredLanguage ?? null });
+      }
+
+      // ── translator: message + keyboard translation (no key, server side) ──
+      case 'translate.text': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const text = String(p.text ?? '').trim().slice(0, 2000);
+        if (!text) return fail('Nothing to translate');
+        const target = /^[a-zA-Z]{2}(-[A-Za-z]{2,4})?$/.test(String(p.target ?? ''))
+          ? String(p.target)
+          : 'en';
+        const url = 'https://translate.googleapis.com/translate_a/single'
+          + '?client=gtx&sl=auto&tl=' + encodeURIComponent(target) + '&dt=t&q='
+          + encodeURIComponent(text);
+        const res = await fetch(url);
+        if (!res.ok) return fail('Translation service unavailable', 502);
+        const data = await res.json();
+        const chunks = Array.isArray(data) && Array.isArray(data[0]) ? data[0] : [];
+        const translated = chunks
+          .map((c: unknown) => (Array.isArray(c) ? String(c[0] ?? '') : ''))
+          .join('');
+        const detected = Array.isArray(data) && typeof data[2] === 'string' ? data[2] : null;
+        if (!translated.trim()) return fail('Could not translate that message', 502);
+        return ok({ translated: translated.slice(0, 4000), detectedLanguage: detected, target });
+      }
+
+      // ── media: which storage backends are connected (voice gating) ──────
+      case 'media.status': {
+        const r2Configured = !!(Deno.env.get('R2_ACCOUNT_ID')
+          && Deno.env.get('R2_ACCESS_KEY_ID')
+          && Deno.env.get('R2_SECRET_ACCESS_KEY')
+          && Deno.env.get('R2_BUCKET'));
+        return ok({ r2Configured });
+      }
+
+      case 'users.preferences': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const genres = Array.isArray(p.genres)
+          ? p.genres.filter((g) => typeof g === 'string').slice(0, 22)
+          : [];
+        await (await dbFor('users')).collection('user_prefs').updateOne(
+          { userId: uid },
+          { $set: { genres, updatedAt: new Date() }, $setOnInsert: { userId: uid } },
+          { upsert: true },
+        );
+        return ok({ saved: genres.length });
+      }
+
+      // ── author tools: book & chapter management ──────────────────────────
+      case 'books.update': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const d = await dbFor('books');
+        const book = await d.collection('books')
+          .findOne({ _id: bookOid(String(p.bookId)) }, { projection: { authorId: 1 } });
+        if (!book) return fail('Book not found', 404);
+        if (book.authorId !== uid) return fail('Only the author can edit this book', 403);
+        const updates: Record<string, unknown> = { updatedAt: new Date() };
+        if (typeof p.title === 'string' && p.title.trim().length >= 2) {
+          updates.title = p.title.trim().slice(0, 200);
+        }
+        if (typeof p.description === 'string') {
+          updates.description = p.description.slice(0, 5000);
+        }
+        if (typeof p.genre === 'string' && p.genre.trim()) updates.genre = p.genre.trim();
+        if (p.status === 'draft' || p.status === 'published') updates.status = String(p.status);
+        if (typeof p.unitType === 'string' && UNIT_TYPES.includes(String(p.unitType))) {
+          updates.unitType = String(p.unitType);
+        }
+        if (typeof p.description === 'string') updates.description = p.description.slice(0, 5000);
+        if (typeof p.coverUrl === 'string' && p.coverUrl.startsWith('http')) {
+          updates.coverUrl = p.coverUrl;
+        }
+        if (typeof p.bannerUrl === 'string' && p.bannerUrl.startsWith('http')) {
+          updates.bannerUrl = p.bannerUrl;
+        }
+        await d.collection('books')
+          .updateOne({ _id: book._id }, { $set: updates });
+        return ok({ updated: true });
+      }
+
+      case 'books.updateChapter': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const bookId = String(p.bookId);
+        const chapterNumber = Number(p.chapterNumber ?? 0);
+        if (!(chapterNumber >= 1)) return fail('A valid chapterNumber is required');
+        const d = await dbFor('books');
+        const book = await d.collection('books')
+          .findOne({ _id: bookOid(bookId) }, { projection: { authorId: 1 } });
+        if (!book) return fail('Book not found', 404);
+        if (book.authorId !== uid) return fail('Only the author can edit chapters', 403);
+        const set: Record<string, unknown> = { updatedAt: new Date() };
+        if (typeof p.title === 'string' && p.title.trim()) {
+          set.title = p.title.trim().slice(0, 200);
+        }
+        if (typeof p.content === 'string') set.content = p.content.slice(0, 500_000);
+        const res = await d.collection('chapters').updateOne(
+          { bookId, chapterNumber } as never,
+          { $set: set },
+        );
+        if (res.matchedCount === 0) return fail('Chapter not found', 404);
+        return ok({ updated: true });
+      }
+
+      // Chapters list for the editor.
+      case 'books.chapters': {
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const d = await dbFor('books');
+        const rows = await d.collection('chapters')
+          .find({ bookId: String(p.bookId) })
+          .sort({ chapterNumber: 1 })
+          .limit(300)
+          .toArray();
+        return ok({
+          chapters: rows.map((c) => ({
+            chapterNumber: c.chapterNumber,
+            title: c.title ?? '',
+            content: c.content ?? '',
+          })),
+        });
+      }
+
+      // ── remix / sequel another author's book (marked forever) ───────────
+      case 'books.remix': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const mode = String(p.mode ?? 'remix') === 'sequel' ? 'sequel' : 'remix';
+        const d = await dbFor('books');
+        const origin = await d.collection('books')
+          .findOne({ _id: bookOid(String(p.bookId)) });
+        if (!origin) return fail('Book not found', 404);
+        if (String(origin.authorId) === uid) {
+          return fail(mode === 'sequel'
+            ? 'Use the same Book ID + title in the studio to add the next part of your own book.'
+            : 'This is already your book — edit it instead.');
+        }
+        const now = new Date();
+        const baseTitle = String(origin.title ?? 'Untitled').slice(0, 140);
+        const title = mode === 'sequel'
+          ? (baseTitle + ': The Next Part').slice(0, 200)
+          : (baseTitle + ' (Remix)').slice(0, 200);
+        const bookCode = (String(origin.bookCode ?? 'book').slice(0, 16) + '-' + mode + '-' + crypto.randomUUID().slice(0, 6));
+        const originId = String(origin._id);
+        const root = origin.sequelRoot ? String(origin.sequelRoot) : originId;
+        const originChapters = await d.collection('chapters')
+          .find({ bookId: originId }).sort({ chapterNumber: 1 }).limit(300).toArray();
+        const doc = {
+          _id: crypto.randomUUID(),
+          title,
+          authorId: uid,
+          authorName: mode === 'sequel'
+            ? String(origin.authorName ?? 'Unknown').slice(0, 70) + ' · sequel'
+            : String(origin.authorName ?? 'Unknown').slice(0, 70) + ' · remixed',
+          description: mode === 'sequel'
+            ? ('An unofficial sequel to "' + baseTitle + '".\n\n' + String(origin.description ?? '').slice(0, 4000))
+            : ('A remix of "' + baseTitle + '" by ' + String(origin.authorName ?? 'an author') + '.\n\n' + String(origin.description ?? '').slice(0, 4000)),
+          genre: origin.genre ?? null,
+          coverUrl: origin.coverUrl ?? null,
+          bannerUrl: origin.bannerUrl ?? null,
+          contentFormat: origin.contentFormat ?? 'markdown',
+          moderationStatus: 'approved',
+          status: 'draft',
+          bookCode,
+          unitType: origin.unitType ?? 'chapter',
+          partNumber: 1,
+          sequelOf: mode === 'sequel' ? originId : null,
+          sequelRoot: mode === 'sequel' ? root : null,
+          remixOf: mode === 'remix' ? originId : null,
+          isRemix: mode === 'remix',
+          chaptersCount: originChapters.length,
+          likeCount: 0, bookmarkCount: 0, viewCount: 0, reviewCount: 0, ratingSum: 0,
+          createdAt: now, updatedAt: now,
+        };
+        await d.collection('books').insertOne(doc);
+        if (originChapters.length > 0) {
+          await d.collection('chapters').insertMany(originChapters.map((c) => ({
+            bookId: String(doc._id),
+            chapterNumber: c.chapterNumber,
+            title: c.title ?? '',
+            content: c.content ?? '',
+            createdAt: now,
+          })));
+        }
+        await d.collection('books').updateOne(
+          { _id: origin._id as unknown as ObjectId },
+          { $inc: { remixCount: 1 } },
+        );
+        await grantGems(uid, 10, mode === 'sequel' ? 'sequel' : 'remix');
+        return ok({ id: doc._id, mode, carriedChapters: originChapters.length });
+      }
+
+      // ── posts: views, reshares, comments (feed store) ────────────────────
+      case 'posts.view': {
+        const uid = await currentUserId(req);
+        const ids = Array.isArray(p.postIds)
+          ? (p.postIds as unknown[]).filter((i) => typeof i === 'string').slice(0, 40)
+          : [];
+        if (ids.length === 0) return ok({ counted: 0 });
+        const feed = await dbFor('feed');
+        const day = new Date().toISOString().slice(0, 10);
+        let counted = 0;
+        for (const postId of ids) {
+          try {
+            await feed.collection('post_views').insertOne({
+              postId, day, viewerId: uid ?? 'anon', createdAt: new Date(),
+            });
+            await feed.collection('posts')
+              .updateOne({ _id: postId }, { $inc: { viewCount: 1 } });
+            counted += 1;
+          } catch (_) { /* duplicate view today — skip */ }
+        }
+        return ok({ counted });
+      }
+
+      case 'posts.reshare': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (typeof p.postId !== 'string' || !p.postId) return fail('A postId is required');
+        const feed = await dbFor('feed');
+        const original = await feed.collection('posts').findOne({ _id: p.postId });
+        if (!original) return fail('Post not found', 404);
+        const existing = await feed.collection('post_reshares')
+          .findOne({ postId: p.postId, userId: uid });
+        if (existing) return ok({ reshared: false });
+        await feed.collection('post_reshares')
+          .insertOne({ postId: p.postId, userId: uid, createdAt: new Date() });
+        await feed.collection('posts')
+          .updateOne({ _id: p.postId }, { $inc: { reshareCount: 1 } });
+        return ok({ reshared: true });
+      }
+
+      case 'posts.comments.list': {
+        if (typeof p.postId !== 'string' || !p.postId) return fail('A postId is required');
+        const rows = await (await dbFor('feed')).collection('post_comments')
+          .find({ postId: p.postId }).sort({ createdAt: 1 }).limit(200).toArray();
+        const authorIds = [...new Set(rows.map((r) => String(r.userId)))];
+        const authors = new Map<string, Record<string, unknown>>();
+        if (authorIds.length > 0) {
+          const profs = await serviceClient().from('profiles')
+            .select('id,username,avatar_url,display_name').in('id', authorIds);
+          for (const pr of profs.data ?? []) authors.set(String(pr.id), pr as Record<string, unknown>);
+        }
+        return ok({
+          comments: rows.map((r) => ({
+            id: String(r._id),
+            text: r.text ?? '',
+            userId: r.userId,
+            createdAt: r.createdAt,
+            parentId: r.parentId ?? null,
+            replyToName: r.replyToName ?? null,
+            replyCount: r.replyCount ?? 0,
+            profile: authors.get(String(r.userId)) ??
+              { username: 'reader', display_name: 'Reader', avatar_url: null },
+          })),
+        });
+      }
+
+      case 'posts.comments.create': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (typeof p.postId !== 'string' || !p.postId) return fail('A postId is required');
+        const text = String(p.text ?? '').trim().slice(0, 1000);
+        if (!text) return fail('Write something first');
+        const feed = await dbFor('feed');
+        // Threads: an optional parent flattens to its root so replies sit
+        // exactly one level deep, with the reply target kept for the badge.
+        let parentId: string | null = null;
+        let replyToName: string | null = null;
+        if (typeof p.parentId === 'string' && isHexId(p.parentId)) {
+          const parent = await feed.collection('post_comments')
+            .findOne({ _id: new ObjectId(p.parentId), postId: p.postId });
+          if (parent) {
+            parentId = typeof parent.parentId === 'string' && parent.parentId
+              ? String(parent.parentId)
+              : String(parent._id);
+            const targetId =
+              typeof parent.parentId === 'string' && parent.parentId
+                ? await (async () => {
+                    const root = await feed.collection('post_comments')
+                      .findOne({ _id: new ObjectId(String(parent!.parentId)) });
+                    return root ? String(root.userId) : String(parent!.userId);
+                  })()
+                : String(parent.userId);
+            if (parent.replyToName) {
+              replyToName = String(parent.replyToName);
+            } else {
+              const names = await namesForUsers([String(parent.userId)]);
+              replyToName = names.get(String(parent.userId)) ?? null;
+            }
+          }
+        }
+        const inserted = await feed.collection('post_comments').insertOne({
+          postId: p.postId, userId: uid, text, createdAt: new Date(),
+          parentId, replyToName,
+        });
+        if (parentId) {
+          await feed.collection('post_comments')
+            .updateOne({ _id: new ObjectId(parentId) }, { $inc: { replyCount: 1 } });
+        }
+        await feed.collection('posts')
+          .updateOne({ _id: p.postId }, { $inc: { commentCount: 1 } });
+        const prof = await serviceClient().from('profiles')
+          .select('id,username,avatar_url,display_name').eq('id', uid).maybeSingle();
+        return ok({ comment: {
+          id: String(inserted.insertedId),
+          text,
+          userId: uid,
+          createdAt: new Date(),
+          parentId,
+          replyToName,
+          profile: prof.data ?? { username: 'reader', display_name: 'Reader', avatar_url: null },
+        } });
+      }
+
+      case 'books.deleteChapter': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const bookId = String(p.bookId);
+        const chapterNumber = Number(p.chapterNumber ?? 0);
+        if (!(chapterNumber >= 1)) return fail('A valid chapterNumber is required');
+        const d = await dbFor('books');
+        const book = await d.collection('books')
+          .findOne({ _id: bookOid(bookId) }, { projection: { authorId: 1 } });
+        if (!book) return fail('Book not found', 404);
+        if (book.authorId !== uid) return fail('Only the author can delete chapters', 403);
+        const res = await d.collection('chapters')
+          .deleteOne({ bookId, chapterNumber } as never);
+        if (res.deletedCount === 0) return fail('Chapter not found', 404);
+        const remaining = await d.collection('chapters')
+          .countDocuments({ bookId });
+        await d.collection('books').updateOne(
+          { _id: bookOid(bookId) },
+          { $set: { chaptersCount: remaining, updatedAt: new Date() } },
+        );
+        return ok({ deleted: true, chaptersCount: remaining });
+      }
+
+      // ── groups: announcement forum (auto-created with every group) ──────
+      // ── brainstorm: community idea threads ───────────────────────────────
+      case 'brainstorm.list': {
+        const feed = await dbFor('feed');
+        try {
+          await feed.collection('brainstorms')
+            .createIndex({ createdAt: -1 });
+        } catch { /* exists */ }
+        const rows = await feed.collection('brainstorms')
+          .find({}).sort({ createdAt: -1 }).limit(60).toArray();
+        const authorIds = [...new Set(rows.map((r) => String(r.userId)))];
+        const authors = new Map<string, Record<string, unknown>>();
+        if (authorIds.length > 0) {
+          const profs = await serviceClient().from('profiles')
+            .select('id,username,avatar_url,display_name').in('id', authorIds);
+          for (const pr of profs.data ?? []) {
+            authors.set(String(pr.id), pr as Record<string, unknown>);
+          }
+        }
+        const me = await currentUserId(req);
+        return ok({
+          ideas: rows.map((r) => ({
+            id: String(r._id),
+            title: r.title ?? '',
+            body: r.body ?? '',
+            userId: r.userId,
+            createdAt: r.createdAt,
+            likeCount: r.likeCount ?? 0,
+            replyCount: r.replyCount ?? 0,
+            liked: me != null && ((r.likedBy as string[]) ?? []).includes(me),
+            profile: authors.get(String(r.userId)) ??
+              { username: 'reader', display_name: 'Reader', avatar_url: null },
+          })),
+        });
+      }
+
+      case 'brainstorm.create': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const title = String(p.title ?? '').trim().slice(0, 160);
+        const body = String(p.body ?? '').trim().slice(0, 4000);
+        if (!title) return fail('Give the idea a title');
+        const feed = await dbFor('feed');
+        const inserted = await feed.collection('brainstorms').insertOne({
+          title, body, userId: uid, likeCount: 0, replyCount: 0,
+          likedBy: [], createdAt: new Date(),
+        });
+        const prof = await serviceClient().from('profiles')
+          .select('id,username,avatar_url,display_name').eq('id', uid).maybeSingle();
+        return ok({ idea: {
+          id: String(inserted.insertedId), title, body, userId: uid,
+          createdAt: new Date(), likeCount: 0, replyCount: 0, liked: false,
+          profile: prof.data ??
+            { username: 'reader', display_name: 'Reader', avatar_url: null },
+        } });
+      }
+
+      case 'brainstorm.like': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const id = String(p.ideaId ?? '');
+        if (!isHexId(id)) return fail('A valid ideaId is required');
+        const col = (await dbFor('feed')).collection('brainstorms');
+        const doc = await col.findOne({ _id: new ObjectId(id) });
+        if (!doc) return fail('Idea not found', 404);
+        const liked = ((doc.likedBy as string[]) ?? []).includes(uid);
+        await col.updateOne({ _id: doc._id }, liked
+          ? { $inc: { likeCount: -1 }, $pull: { likedBy: uid } }
+          : { $inc: { likeCount: 1 }, $addToSet: { likedBy: uid } });
+        return ok({ liked: !liked, likeCount: Math.max(0,
+          Number(doc.likeCount ?? 0) + (liked ? -1 : 1)) });
+      }
+
+      case 'brainstorm.reply': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const ideaId = String(p.ideaId ?? '');
+        if (!isHexId(ideaId)) return fail('A valid ideaId is required');
+        const text = String(p.text ?? '').trim().slice(0, 1000);
+        if (!text) return fail('Write something first');
+        const feed = await dbFor('feed');
+        const idea = await feed.collection('brainstorms')
+          .findOne({ _id: new ObjectId(ideaId) });
+        if (!idea) return fail('Idea not found', 404);
+        // Threads: replies flatten to the root, keeping the reply badge.
+        let parentId: string | null = null;
+        let replyToName: string | null = null;
+        if (typeof p.parentId === 'string' && isHexId(p.parentId)) {
+          const parent = await feed.collection('brainstorm_replies')
+            .findOne({ _id: new ObjectId(p.parentId), ideaId });
+          if (parent) {
+            parentId = typeof parent.parentId === 'string' && parent.parentId
+              ? String(parent.parentId)
+              : String(parent._id);
+            if (parent.replyToName) replyToName = String(parent.replyToName);
+            else {
+              const names = await namesForUsers([String(parent.userId)]);
+              replyToName = names.get(String(parent.userId)) ?? null;
+            }
+          }
+        }
+        const inserted = await feed.collection('brainstorm_replies')
+          .insertOne({ ideaId, userId: uid, text, createdAt: new Date(),
+            parentId, replyToName });
+        if (parentId) {
+          await feed.collection('brainstorm_replies')
+            .updateOne({ _id: new ObjectId(parentId) },
+              { $inc: { replyCount: 1 } });
+        }
+        await feed.collection('brainstorms')
+          .updateOne({ _id: new ObjectId(ideaId) },
+            { $inc: { replyCount: 1 } });
+        const prof = await serviceClient().from('profiles')
+          .select('id,username,avatar_url,display_name').eq('id', uid).maybeSingle();
+        return ok({ reply: {
+          id: String(inserted.insertedId), ideaId, text, userId: uid,
+          createdAt: new Date(), parentId, replyToName,
+          profile: prof.data ??
+            { username: 'reader', display_name: 'Reader', avatar_url: null },
+        } });
+      }
+
+      case 'brainstorm.replies': {
+        const ideaId = String(p.ideaId ?? '');
+        if (!isHexId(ideaId)) return fail('A valid ideaId is required');
+        const rows = await (await dbFor('feed')).collection('brainstorm_replies')
+          .find({ ideaId }).sort({ createdAt: 1 }).limit(200).toArray();
+        const authorIds = [...new Set(rows.map((r) => String(r.userId)))];
+        const authors = new Map<string, Record<string, unknown>>();
+        if (authorIds.length > 0) {
+          const profs = await serviceClient().from('profiles')
+            .select('id,username,avatar_url,display_name').in('id', authorIds);
+          for (const pr of profs.data ?? []) {
+            authors.set(String(pr.id), pr as Record<string, unknown>);
+          }
+        }
+        return ok({
+          replies: rows.map((r) => ({
+            id: String(r._id), ideaId: r.ideaId, text: r.text ?? '',
+            userId: r.userId, createdAt: r.createdAt,
+            parentId: r.parentId ?? null,
+            replyToName: r.replyToName ?? null,
+            replyCount: r.replyCount ?? 0,
+            profile: authors.get(String(r.userId)) ??
+              { username: 'reader', display_name: 'Reader', avatar_url: null },
+          })),
+        });
+      }
+
+      // ── school LMS: classes, assignments, exam countdowns ────────────────
+      case 'schools.class.create': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const schoolId = String(p.schoolId ?? '');
+        const name = String(p.name ?? '').trim().slice(0, 120);
+        if (!schoolId || !name) {
+          return fail('A school and a class name are required');
+        }
+        const school = await groupManager('schools', schoolId, uid);
+        if (!school) {
+          return fail('Only the school owner can create classes', 403);
+        }
+        const col = (await dbFor('groups')).collection('school_classes');
+        const inserted = await col.insertOne({
+          schoolId, name, teacherId: String(p.teacherId ?? '') || uid,
+          createdAt: new Date(),
+        });
+        return ok({ class: {
+          id: String(inserted.insertedId), schoolId, name,
+          teacherId: String(p.teacherId ?? '') || uid,
+        } });
+      }
+
+      case 'schools.class.list': {
+        const schoolId = String(p.schoolId ?? '');
+        if (!schoolId) return fail('A valid schoolId is required');
+        const me = await currentUserId(req);
+        const classes = await (await dbFor('groups'))
+          .collection('school_classes')
+          .find({ schoolId }).sort({ createdAt: 1 }).limit(60).toArray();
+        const ids = classes.map((c) => String(c._id));
+        const counts = new Map<string, number>();
+        const mine = new Set<string>();
+        if (ids.length > 0) {
+          const rows = await (await dbFor('groups'))
+            .collection('school_class_members')
+            .find({ classId: { $in: ids } }).limit(5000).toArray();
+          for (const row of rows) {
+            const cid = String(row.classId);
+            counts.set(cid, (counts.get(cid) ?? 0) + 1);
+            if (me && String(row.userId) === me) mine.add(cid);
+          }
+        }
+        const names = await namesForUsers(
+          classes.map((c) => String(c.teacherId)));
+        return ok({
+          classes: classes.map((c) => ({
+            id: String(c._id), name: c.name ?? '',
+            teacherId: c.teacherId ?? '',
+            teacherName: names.get(String(c.teacherId)) ?? 'Teacher',
+            members: counts.get(String(c._id)) ?? 0,
+            joined: mine.has(String(c._id)),
+          })),
+        });
+      }
+
+      case 'schools.class.join':
+      case 'schools.class.leave': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const classId = String(p.classId ?? '');
+        if (!classId) return fail('A valid classId is required');
+        const members = (await dbFor('groups'))
+          .collection('school_class_members');
+        try {
+          await members.createIndex(
+            { classId: 1, userId: 1 }, { unique: true });
+        } catch { /* exists */ }
+        if (action === 'schools.class.join') {
+          try {
+            await members.insertOne(
+              { classId, userId: uid, joinedAt: new Date() });
+          } catch (error) {
+            if (!isDupKey(error)) throw error;
+          }
+        } else {
+          await members.deleteOne({ classId, userId: uid });
+        }
+        return ok({ member: action === 'schools.class.join' });
+      }
+
+      case 'schools.assignment.create': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const classId = String(p.classId ?? '');
+        const title = String(p.title ?? '').trim().slice(0, 160);
+        const body = String(p.body ?? '').trim().slice(0, 4000);
+        if (!classId || !title) {
+          return fail('A class and a title are required');
+        }
+        const klass = await (await dbFor('groups'))
+          .collection('school_classes')
+          .findOne({ _id: new ObjectId(classId) } as never);
+        if (!klass) return fail('Class not found', 404);
+        const manager = await groupManager(
+          'schools', String(klass.schoolId), uid);
+        if (!manager && String(klass.teacherId) !== uid) {
+          return fail('Only the teacher can set assignments', 403);
+        }
+        let dueAt: Date | null = null;
+        if (typeof p.dueAt === 'string' && p.dueAt) {
+          const parsed = new Date(p.dueAt);
+          if (!isNaN(parsed.getTime())) dueAt = parsed;
+        }
+        let book: Record<string, unknown> | null = null;
+        if (typeof p.bookId === 'string' && isHexId(p.bookId)) {
+          const b = await (await dbFor('books')).collection('books')
+            .findOne({ _id: new ObjectId(p.bookId) },
+              { projection: { title: 1, authorName: 1, coverUrl: 1 } });
+          if (b) {
+            book = {
+              bookId: p.bookId,
+              title: String(b.title ?? 'Untitled').slice(0, 200),
+              authorName: String(b.authorName ?? 'Unknown').slice(0, 120),
+              coverUrl: typeof b.coverUrl === 'string' ? b.coverUrl : null,
+            };
+          }
+        }
+        const inserted = await (await dbFor('groups'))
+          .collection('school_assignments').insertOne({
+            classId, schoolId: String(klass.schoolId), title, body,
+            dueAt, book, createdById: uid,
+            doneBy: [], createdAt: new Date(),
+          });
+        return ok({ assignment: { id: String(inserted.insertedId) } });
+      }
+
+      case 'schools.assignment.list': {
+        const schoolId = String(p.schoolId ?? '');
+        if (!schoolId) return fail('A valid schoolId is required');
+        const me = await currentUserId(req);
+        const rows = await (await dbFor('groups'))
+          .collection('school_assignments')
+          .find({ schoolId }).sort({ createdAt: -1 }).limit(100).toArray();
+        const classIds = [...new Set(rows.map((r) => String(r.classId)))];
+        const classNames = new Map<string, string>();
+        if (classIds.length > 0) {
+          const klasses = await (await dbFor('groups'))
+            .collection('school_classes')
+            .find({ _id: { $in: classIds.map((i) => new ObjectId(i)) } })
+            .project({ name: 1 }).toArray();
+          for (const k of klasses) classNames.set(String(k._id), String(k.name ?? ''));
+        }
+        return ok({
+          assignments: rows.map((r) => ({
+            id: String(r._id),
+            classId: String(r.classId),
+            className: classNames.get(String(r.classId)) ?? 'Class',
+            title: r.title ?? '', body: r.body ?? '',
+            dueAt: r.dueAt ?? null,
+            book: r.book ?? null,
+            done: me != null && ((r.doneBy as string[]) ?? []).includes(me),
+            doneCount: ((r.doneBy as string[]) ?? []).length,
+          })),
+        });
+      }
+
+      case 'schools.assignment.done': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const id = String(p.assignmentId ?? '');
+        if (!isHexId(id)) return fail('A valid assignmentId is required');
+        const col = (await dbFor('groups')).collection('school_assignments');
+        const doc = await col.findOne({ _id: new ObjectId(id) });
+        if (!doc) return fail('Assignment not found', 404);
+        const done = ((doc.doneBy as string[]) ?? []).includes(uid);
+        await col.updateOne({ _id: doc._id }, done
+          ? { $pull: { doneBy: uid } }
+          : { $addToSet: { doneBy: uid } });
+        return ok({ done: !done });
+      }
+
+      case 'schools.exam.create': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const schoolId = String(p.schoolId ?? '');
+        const title = String(p.title ?? '').trim().slice(0, 160);
+        if (!schoolId || !title) {
+          return fail('A school and a title are required');
+        }
+        const manager = await groupManager('schools', schoolId, uid);
+        if (!manager) {
+          return fail('Only the school owner can schedule exams', 403);
+        }
+        let at: Date | null = null;
+        if (typeof p.at === 'string' && p.at) {
+          const parsed = new Date(p.at);
+          if (!isNaN(parsed.getTime())) at = parsed;
+        }
+        const inserted = await (await dbFor('groups'))
+          .collection('school_exams').insertOne({
+            schoolId, title,
+            subject: String(p.subject ?? '').slice(0, 60) || null,
+            at, createdAt: new Date(),
+          });
+        return ok({ exam: { id: String(inserted.insertedId) } });
+      }
+
+      case 'schools.exam.list': {
+        const schoolId = String(p.schoolId ?? '');
+        if (!schoolId) return fail('A valid schoolId is required');
+        const rows = await (await dbFor('groups')).collection('school_exams')
+          .find({ schoolId }).sort({ at: 1 }).limit(60).toArray();
+        return ok({
+          exams: rows.map((r) => ({
+            id: String(r._id), title: r.title ?? '',
+            subject: r.subject ?? null, at: r.at ?? null,
+          })),
+        });
+      }
+
+      // ── kind superpowers: POTM, vice mods, school lists, leaderboards ────
+      async function groupManager(
+        kind: string, groupId: string, uid: string,
+      ): Promise<Record<string, unknown> | null> {
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return null;
+        const group = await (await dbFor('groups')).collection(kind)
+          .findOne({ _id: groupId } as never,
+            { projection: { ownerId: 1, viceModeratorId: 1, name: 1 } });
+        if (!group) return null;
+        const isManager =
+          group.ownerId === uid || group.viceModeratorId === uid;
+        return isManager ? group as Record<string, unknown> : null;
+      }
+
+      case 'clubs.potm.set': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'clubs');
+        const groupId = String(p.groupId ?? '');
+        const group = await groupManager(kind, groupId, uid);
+        if (!group) return fail('Only the group owner can pick the read', 403);
+        const bookId = String(p.bookId ?? '');
+        if (!isHexId(bookId)) return fail('A valid bookId is required');
+        const book = await (await dbFor('books')).collection('books')
+          .findOne({ _id: new ObjectId(bookId) },
+            { projection: { title: 1, authorName: 1, coverUrl: 1 } });
+        if (!book) return fail('That book does not exist', 404);
+        const potm = {
+          bookId,
+          title: String(book.title ?? 'Untitled').slice(0, 200),
+          authorName: String(book.authorName ?? 'Unknown').slice(0, 120),
+          coverUrl: typeof book.coverUrl === 'string' ? book.coverUrl : null,
+          setAt: new Date(),
+        };
+        await (await dbFor('groups')).collection(kind)
+          .updateOne({ _id: groupId } as never, { $set: { potm } });
+        return ok({ potm });
+      }
+
+      case 'clubs.potm.clear': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'clubs');
+        const groupId = String(p.groupId ?? '');
+        const group = await groupManager(kind, groupId, uid);
+        if (!group) return fail('Only the group owner can change the read', 403);
+        await (await dbFor('groups')).collection(kind)
+          .updateOne({ _id: groupId } as never, { $set: { potm: null } });
+        return ok({ cleared: true });
+      }
+
+      case 'groups.vice.set': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'organizations');
+        const groupId = String(p.groupId ?? '');
+        const col = (await dbFor('groups')).collection(kind);
+        const group = await col
+          .findOne({ _id: groupId } as never, { projection: { ownerId: 1 } });
+        if (!group) return fail('Group not found', 404);
+        if (group.ownerId !== uid) {
+          return fail('Only the owner can assign the deputy', 403);
+        }
+        const members = (await dbFor('groups')).collection(`${kind}_members`);
+        const target = typeof p.userId === 'string' ? p.userId : '';
+        if (!target) {
+          const previous = String(group.viceModeratorId ?? '');
+          await col.updateOne({ _id: groupId } as never,
+            { $set: { viceModeratorId: null } });
+          if (previous) {
+            await members.updateOne(
+              { groupId, userId: previous }, { $set: { role: 'member' } });
+          }
+          return ok({ viceModeratorId: null });
+        }
+        const member = await members.findOne({ groupId, userId: target });
+        if (!member) return fail('That reader is not a member', 404);
+        if (target === group.ownerId) {
+          return fail('The owner already leads this group');
+        }
+        const previous = String(group.viceModeratorId ?? '');
+        await col.updateOne({ _id: groupId } as never,
+          { $set: { viceModeratorId: target } });
+        await members.updateOne(
+          { groupId, userId: target }, { $set: { role: 'vice' } });
+        if (previous && previous !== target) {
+          await members.updateOne(
+            { groupId, userId: previous }, { $set: { role: 'member' } });
+        }
+        return ok({ viceModeratorId: target });
+      }
+
+      case 'schools.readinglist.add': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'schools');
+        const groupId = String(p.groupId ?? '');
+        const group = await groupManager(kind, groupId, uid);
+        if (!group) return fail('Only the school owner can curate the list', 403);
+        const bookId = String(p.bookId ?? '');
+        if (!isHexId(bookId)) return fail('A valid bookId is required');
+        const book = await (await dbFor('books')).collection('books')
+          .findOne({ _id: new ObjectId(bookId) },
+            { projection: { title: 1, authorName: 1, coverUrl: 1 } });
+        if (!book) return fail('That book does not exist', 404);
+        const doc = await (await dbFor('groups')).collection(kind)
+          .findOne({ _id: groupId } as never,
+            { projection: { readingList: 1 } });
+        const list = Array.isArray(doc?.readingList) ? doc!.readingList : [];
+        if (list.some((e) => e && e.bookId === bookId)) {
+          return fail('Already on the reading list');
+        }
+        const entry = {
+          bookId,
+          title: String(book.title ?? 'Untitled').slice(0, 200),
+          authorName: String(book.authorName ?? 'Unknown').slice(0, 120),
+          coverUrl: typeof book.coverUrl === 'string' ? book.coverUrl : null,
+          addedAt: new Date(),
+        };
+        await (await dbFor('groups')).collection(kind).updateOne(
+          { _id: groupId } as never,
+          { $push: { readingList: { $each: [entry], $slice: -40 } } });
+        return ok({ entry });
+      }
+
+      case 'schools.readinglist.remove': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'schools');
+        const groupId = String(p.groupId ?? '');
+        const group = await groupManager(kind, groupId, uid);
+        if (!group) return fail('Only the school owner can curate the list', 403);
+        const bookId = String(p.bookId ?? '');
+        await (await dbFor('groups')).collection(kind).updateOne(
+          { _id: groupId } as never,
+          { $pull: { readingList: { bookId } } });
+        return ok({ removed: bookId });
+      }
+
+      case 'schools.leaderboard': {
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        if (!groupId) return fail('A valid groupId is required');
+        const kind = String(p.kind ?? 'schools');
+        const memberRows = await (await dbFor('groups'))
+          .collection(`${kind}_members`)
+          .find({ groupId }).limit(500).toArray();
+        const ids = memberRows.map((m) => String(m.userId));
+        if (ids.length === 0) return ok({ leaders: [] });
+        const since = ObjectId.createFromTime(
+          Math.floor((Date.now() - 30 * 24 * 3600 * 1000) / 1000));
+        const rows = await (await dbFor('social')).collection('book_views')
+          .aggregate([
+            { $match: { userId: { $in: ids }, _id: { $gte: since } } },
+            { $group: { _id: '$userId', books: { $addToSet: '$bookId' } } },
+            { $project: { distinctBooks: { $size: '$books' } } },
+            { $sort: { distinctBooks: -1, _id: 1 } },
+            { $limit: 10 },
+          ]).toArray();
+        const names = await namesForUsers(rows.map((r) => String(r._id)));
+        return ok({
+          leaders: rows.map((r, i) => ({
+            rank: i + 1,
+            userId: String(r._id),
+            name: names.get(String(r._id)) ?? 'Reader',
+            books: r.distinctBooks ?? 0,
+          })),
+        });
+      }
+
+      case 'groups.announcements.list': {
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        if (!groupId) return fail('A valid groupId is required');
+        const rows = await (await dbFor('groups')).collection('announcements')
+          .find({ groupId }).sort({ createdAt: -1 }).limit(120).toArray();
+        const kindOf = String(rows[0]?.kind ?? p.kind ?? 'clubs');
+        const manager = uid
+          ? await isGroupManager(kindOf, groupId, uid)
+          : false;
+        const profiles = new Map<string, { username?: string; display_name?: string }>();
+        const authorIds = [...new Set(rows.map((r) => String(r.authorId)))];
+        if (authorIds.length) {
+          const pr = await serviceClient().from('profiles')
+            .select('id, username, display_name').in('id', authorIds);
+          for (const row of pr.data ?? []) {
+            profiles.set(String(row.id), row as { username?: string; display_name?: string });
+          }
+        }
+        const unitsCol = (await dbFor('groups')).collection('units');
+        const unitNames = new Map<string, string>();
+        const unitIds = [...new Set(rows.flatMap((r) =>
+          Array.isArray(r.audience) ? r.audience.map((x) => String(x)) : []))];
+        for (const unitId of unitIds) {
+          if (unitId === 'all' || unitNames.has(unitId)) continue;
+          const unit = isHexId(unitId)
+            ? await unitsCol.findOne({ _id: new ObjectId(unitId) } as never,
+                { projection: { name: 1 } })
+            : null;
+          if (unit) unitNames.set(unitId, String(unit.name));
+        }
+        return ok({ announcements: rows
+          .filter((a) => a.published !== false || manager)
+          .slice(0, 60)
+          .map((a) => ({
+          id: String(a._id),
+          title: a.title ?? '',
+          body: a.body ?? '',
+          authorId: a.authorId ?? null,
+          authorName: profiles.get(String(a.authorId))?.display_name
+            ?? profiles.get(String(a.authorId))?.username ?? null,
+          pinned: a.pinned === true,
+          published: a.published !== false,
+          audience: Array.isArray(a.audience) ? a.audience : ['all'],
+          audienceNames: (Array.isArray(a.audience) ? a.audience : ['all'])
+            .map((x) => (x === 'all' ? 'Everyone' : unitNames.get(String(x)) ?? 'Department')),
+          createdAt: a.createdAt ?? null,
+        })) });
+      }
+
+      case 'groups.announcements.post': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        if (!groupId) return fail('A valid groupId is required');
+        const title = String(p.title ?? '').trim().slice(0, 160);
+        const body = String(p.body ?? '').trim().slice(0, 4000);
+        if (!title || !body) return fail('A title and a message are required');
+        const kind = String(p.kind ?? 'clubs');
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return fail('Unknown group kind');
+        const group = await (await dbFor('groups')).collection(kind)
+          .findOne({ _id: groupId } as never, { projection: { ownerId: 1, viceModeratorId: 1 } });
+        if (!group) return fail('Group not found', 404);
+        const canPost = group.ownerId === uid || group.viceModeratorId === uid;
+        if (!canPost) return fail('Only owners can post announcements', 403);
+        const doc = {
+          groupId, kind, title, body, authorId: uid,
+          pinned: p.pinned === true,
+          // Drafts stay visible to managers only until published.
+          published: p.published !== false,
+          // 'all' (default) or department ids.
+          audience: Array.isArray(p.audience) && p.audience.length
+            ? p.audience.map((x) => String(x)).slice(0, 50)
+            : ['all'],
+          createdAt: new Date(),
+        };
+        const inserted = await (await dbFor('groups'))
+          .collection('announcements').insertOne({ ...doc });
+        return ok({ announcement: { id: String(inserted.insertedId), ...doc } });
+      }
+
+      case 'groups.announcements.delete': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const id = typeof p.announcementId === 'string' ? p.announcementId : '';
+        const col = (await dbFor('groups')).collection('announcements');
+        const doc = isHexId(id)
+          ? await col.findOne({ _id: new ObjectId(id) })
+          : null;
+        if (!doc) return fail('Announcement not found', 404);
+        const group = await (await dbFor('groups')).collection(String(doc.kind ?? 'clubs'))
+          .findOne({ _id: String(doc.groupId) } as never,
+            { projection: { ownerId: 1, viceModeratorId: 1 } });
+        const canDelete = group?.ownerId === uid || group?.viceModeratorId === uid;
+        if (!canDelete) return fail('Only owners can remove announcements', 403);
+        await col.deleteOne({ _id: doc._id } as never);
+        return ok({ deleted: true });
+      }
+
+      // ── Organization departments (units) ─────────────────────────────
+      case 'groups.units.create': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'organizations');
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return fail('Unknown group kind');
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        if (!groupId) return fail('A valid groupId is required');
+        const name = String(p.name ?? '').trim().slice(0, 80);
+        if (!name) return fail('A department name is required');
+        const groups = (await dbFor('groups')).collection(kind);
+        const group = await groups
+          .findOne({ _id: groupId } as never,
+            { projection: { ownerId: 1, viceModeratorId: 1 } });
+        if (!group) return fail('Group not found', 404);
+        if (group.ownerId !== uid && group.viceModeratorId !== uid) {
+          return fail('Only owners and deputies can create departments', 403);
+        }
+        const units = (await dbFor('groups')).collection('units');
+        const dupe = await units.findOne({ groupId, name });
+        if (dupe) return fail('A department with that name already exists');
+        const doc = { groupId, kind, name, leadId: null, createdAt: new Date() };
+        const inserted = await units.insertOne({ ...doc });
+        return ok({ unit: { id: String(inserted.insertedId), ...doc } });
+      }
+
+      case 'groups.units.list': {
+        const kind = String(p.kind ?? 'organizations');
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        if (!groupId) return fail('A valid groupId is required');
+        const units = (await dbFor('groups')).collection('units');
+        const rows = await units
+          .find({ groupId }).sort({ createdAt: 1 }).limit(100).toArray();
+        const members = (await dbFor('groups')).collection('unit_members');
+        const counts: number[] = [];
+        const rosters: string[][] = [];
+        for (const u of rows) {
+          const uid16 = String(u._id);
+          counts.push(await members.countDocuments({ unitId: uid16 }));
+          const roster = await members
+            .find({ unitId: uid16 }, { projection: { userId: 1 } })
+            .limit(200).toArray();
+          rosters.push(roster.map((r) => String(r.userId)));
+        }
+        return ok({ units: rows.map((u, i) => ({
+          id: String(u._id),
+          name: u.name ?? '',
+          leadId: u.leadId ?? null,
+          memberCount: counts[i],
+          memberIds: rosters[i],
+          createdAt: u.createdAt ?? null,
+        })) });
+      }
+
+      case 'groups.units.remove': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'organizations');
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        const unitId = typeof p.unitId === 'string' ? p.unitId : '';
+        if (!groupId || !isHexId(unitId)) return fail('A valid unitId is required');
+        const group = await (await dbFor('groups')).collection(kind)
+          .findOne({ _id: groupId } as never,
+            { projection: { ownerId: 1, viceModeratorId: 1 } });
+        if (!group) return fail('Group not found', 404);
+        if (group.ownerId !== uid && group.viceModeratorId !== uid) {
+          return fail('Only owners and deputies can remove departments', 403);
+        }
+        const db = await dbFor('groups');
+        await db.collection('units')
+          .deleteOne({ _id: new ObjectId(unitId) } as never);
+        await db.collection('unit_members')
+          .deleteMany({ unitId } as never);
+        return ok({ deleted: true });
+      }
+
+      case 'groups.units.join': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const unitId = typeof p.unitId === 'string' ? p.unitId : '';
+        if (!isHexId(unitId)) return fail('A valid unitId is required');
+        const unit = await (await dbFor('groups')).collection('units')
+          .findOne({ _id: new ObjectId(unitId) } as never);
+        if (!unit) return fail('Department not found', 404);
+        const kind = String(unit.kind ?? 'organizations');
+        const member = await (await dbFor('groups'))
+          .collection(`${kind}_members`)
+          .findOne({ groupId: String(unit.groupId), userId: uid });
+        if (!member) return fail('Join the organization first', 403);
+        await (await dbFor('groups')).collection('unit_members')
+          .updateOne({ unitId, userId: uid } as never,
+            { $set: { unitId, userId: uid, groupId: String(unit.groupId), joinedAt: new Date() } },
+            { upsert: true });
+        return ok({ joined: true });
+      }
+
+      case 'groups.units.leave': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const unitId = typeof p.unitId === 'string' ? p.unitId : '';
+        if (!isHexId(unitId)) return fail('A valid unitId is required');
+        await (await dbFor('groups')).collection('unit_members')
+          .deleteOne({ unitId, userId: uid } as never);
+        return ok({ left: true });
+      }
+
+      case 'groups.units.setLead': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const unitId = typeof p.unitId === 'string' ? p.unitId : '';
+        if (!isHexId(unitId)) return fail('A valid unitId is required');
+        const unit = await (await dbFor('groups')).collection('units')
+          .findOne({ _id: new ObjectId(unitId) } as never);
+        if (!unit) return fail('Department not found', 404);
+        const kind = String(unit.kind ?? 'organizations');
+        const group = await (await dbFor('groups')).collection(kind)
+          .findOne({ _id: String(unit.groupId) } as never,
+            { projection: { ownerId: 1, viceModeratorId: 1 } });
+        if (!group) return fail('Group not found', 404);
+        if (group.ownerId !== uid && group.viceModeratorId !== uid) {
+          return fail('Only owners and deputies can assign leads', 403);
+        }
+        const target = typeof p.userId === 'string' ? p.userId : '';
+        if (!target) {
+          await (await dbFor('groups')).collection('units')
+            .updateOne({ _id: new ObjectId(unitId) } as never,
+              { $set: { leadId: null } });
+          return ok({ leadId: null });
+        }
+        const member = await (await dbFor('groups'))
+          .collection(`${kind}_members`)
+          .findOne({ groupId: String(unit.groupId), userId: target });
+        if (!member) return fail('That reader is not a member', 404);
+        await (await dbFor('groups')).collection('units')
+          .updateOne({ _id: new ObjectId(unitId) } as never,
+            { $set: { leadId: target } });
+        return ok({ leadId: target });
+      }
+
+      // ── Organization verification (overall moderator only) ───────────
+      case 'groups.verify.set': {
+        const admin = await adminUserId(req);
+        if (!admin) return fail('Only the overall moderator can verify', 403);
+        const kind = String(p.kind ?? 'organizations');
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return fail('Unknown group kind');
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        if (!groupId) return fail('A valid groupId is required');
+        const verified = p.verified === true;
+        await (await dbFor('groups')).collection(kind)
+          .updateOne({ _id: groupId } as never, { $set: { verified } });
+        return ok({ verified });
+      }
+
+      // ── Community / organization channels ────────────────────────────
+      case 'groups.channels.create': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'communities');
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return fail('Unknown group kind');
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        if (!groupId) return fail('A valid groupId is required');
+        const name = String(p.name ?? '').trim().slice(0, 48);
+        if (!name) return fail('A channel name is required');
+        const group = await (await dbFor('groups')).collection(kind)
+          .findOne({ _id: groupId } as never,
+            { projection: { ownerId: 1, viceModeratorId: 1 } });
+        if (!group) return fail('Group not found', 404);
+        if (group.ownerId !== uid && group.viceModeratorId !== uid) {
+          return fail('Only owners and deputies can add channels', 403);
+        }
+        const channels = (await dbFor('groups')).collection('channels');
+        const nameKey = name.toLowerCase();
+        if (await channels.findOne({ groupId, nameKey })) {
+          return fail('A channel with that name already exists');
+        }
+        const doc = { groupId, kind, name, nameKey, createdAt: new Date() };
+        const inserted = await channels.insertOne({ ...doc });
+        return ok({ channel: { id: String(inserted.insertedId), ...doc } });
+      }
+
+      case 'groups.channels.list': {
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        if (!groupId) return fail('A valid groupId is required');
+        const rows = await (await dbFor('groups')).collection('channels')
+          .find({ groupId }).sort({ createdAt: 1 }).limit(60).toArray();
+        return ok({ channels: rows.map((c) => ({
+          id: String(c._id),
+          name: c.name ?? '',
+          createdAt: c.createdAt ?? null,
+        })) });
+      }
+
+      case 'groups.channels.remove': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'communities');
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        const channelId = typeof p.channelId === 'string' ? p.channelId : '';
+        if (!groupId || !isHexId(channelId)) return fail('A valid channelId is required');
+        const group = await (await dbFor('groups')).collection(kind)
+          .findOne({ _id: groupId } as never,
+            { projection: { ownerId: 1, viceModeratorId: 1 } });
+        if (!group) return fail('Group not found', 404);
+        if (group.ownerId !== uid && group.viceModeratorId !== uid) {
+          return fail('Only owners and deputies can remove channels', 403);
+        }
+        await (await dbFor('groups')).collection('channels')
+          .deleteOne({ _id: new ObjectId(channelId) } as never);
+        return ok({ deleted: true });
+      }
+
+      // ── Group events with RSVPs ──────────────────────────────────────
+      case 'groups.events.create': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'organizations');
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return fail('Unknown group kind');
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        if (!groupId) return fail('A valid groupId is required');
+        const title = String(p.title ?? '').trim().slice(0, 120);
+        const body = String(p.body ?? '').trim().slice(0, 600);
+        if (!title) return fail('An event title is required');
+        const group = await (await dbFor('groups')).collection(kind)
+          .findOne({ _id: groupId } as never,
+            { projection: { ownerId: 1, viceModeratorId: 1 } });
+        if (!group) return fail('Group not found', 404);
+        if (group.ownerId !== uid && group.viceModeratorId !== uid) {
+          return fail('Only owners and deputies can schedule events', 403);
+        }
+        let at: Date | null = null;
+        if (typeof p.at === 'string' && p.at.trim()) {
+          const parsed = new Date(p.at);
+          if (!Number.isNaN(parsed.getTime())) at = parsed;
+        }
+        const doc = { groupId, kind, title, body, at, createdBy: uid, createdAt: new Date() };
+        const inserted = await (await dbFor('groups'))
+          .collection('events').insertOne({ ...doc });
+        return ok({ event: { id: String(inserted.insertedId), ...doc } });
+      }
+
+      case 'groups.events.list': {
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        if (!groupId) return fail('A valid groupId is required');
+        const uid = await currentUserId(req);
+        const events = (await dbFor('groups')).collection('events');
+        const rows = await events
+          .find({ groupId }).sort({ createdAt: -1 }).limit(50).toArray();
+        const rsvps = (await dbFor('groups')).collection('event_rsvps');
+        const out = [];
+        for (const e of rows) {
+          const eventId = String(e._id);
+          const going = await rsvps.countDocuments({ eventId, status: 'going' });
+          const interested = await rsvps.countDocuments({ eventId, status: 'interested' });
+          let myStatus: string | null = null;
+          if (uid) {
+            const mine = await rsvps.findOne({ eventId, userId: uid });
+            myStatus = mine ? String(mine.status ?? 'none') : null;
+          }
+          out.push({
+            id: eventId,
+            title: e.title ?? '',
+            body: e.body ?? '',
+            at: e.at ?? null,
+            going,
+            interested,
+            myStatus,
+          });
+        }
+        return ok({ events: out });
+      }
+
+      case 'groups.events.rsvp': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const eventId = typeof p.eventId === 'string' ? p.eventId : '';
+        if (!isHexId(eventId)) return fail('A valid eventId is required');
+        const event = await (await dbFor('groups')).collection('events')
+          .findOne({ _id: new ObjectId(eventId) } as never);
+        if (!event) return fail('Event not found', 404);
+        const kind = String(event.kind ?? 'organizations');
+        if (!(await isClubMember(kind, String(event.groupId), uid))) {
+          return fail('Join the group to respond', 403);
+        }
+        const status = ['going', 'interested', 'none'].includes(String(p.status))
+          ? String(p.status)
+          : 'none';
+        const rsvps = (await dbFor('groups')).collection('event_rsvps');
+        if (status === 'none') {
+          await rsvps.deleteOne({ eventId, userId: uid } as never);
+        } else {
+          await rsvps.updateOne({ eventId, userId: uid } as never,
+            { $set: { eventId, userId: uid, status, updatedAt: new Date() } },
+            { upsert: true });
+        }
+        return ok({ status });
+      }
+
+      case 'groups.events.remove': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const eventId = typeof p.eventId === 'string' ? p.eventId : '';
+        if (!isHexId(eventId)) return fail('A valid eventId is required');
+        const events = (await dbFor('groups')).collection('events');
+        const event = await events
+          .findOne({ _id: new ObjectId(eventId) } as never);
+        if (!event) return fail('Event not found', 404);
+        const kind = String(event.kind ?? 'organizations');
+        const group = await (await dbFor('groups')).collection(kind)
+          .findOne({ _id: String(event.groupId) } as never,
+            { projection: { ownerId: 1, viceModeratorId: 1 } });
+        const allowed = group?.ownerId === uid ||
+          group?.viceModeratorId === uid ||
+          String(event.createdBy) === uid;
+        if (!allowed) return fail('Only owners, deputies or the host can remove this event', 403);
+        await events.deleteOne({ _id: event._id } as never);
+        await (await dbFor('groups')).collection('event_rsvps')
+          .deleteMany({ eventId } as never);
+        return ok({ deleted: true });
+      }
+
+      // ── Group rules (owner / deputy) ─────────────────────────────────
+      case 'groups.rules.set': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const kind = String(p.kind ?? 'communities');
+        if (!(GROUP_KINDS as readonly string[]).includes(kind)) return fail('Unknown group kind');
+        const groupId = typeof p.groupId === 'string' ? p.groupId : '';
+        if (!groupId) return fail('A valid groupId is required');
+        const group = await (await dbFor('groups')).collection(kind)
+          .findOne({ _id: groupId } as never,
+            { projection: { ownerId: 1, viceModeratorId: 1 } });
+        if (!group) return fail('Group not found', 404);
+        if (group.ownerId !== uid && group.viceModeratorId !== uid) {
+          return fail('Only owners and deputies can set the rules', 403);
+        }
+        const raw = (Array.isArray(p.rules) ? p.rules : [])
+          .map((r) => String(r ?? '').trim().slice(0, 280))
+          .filter((r) => r.length > 0)
+          .slice(0, 12);
+        await (await dbFor('groups')).collection(kind)
+          .updateOne({ _id: groupId } as never, { $set: { rules: raw } });
+        return ok({ rules: raw });
+      }
+
+      // ── event reminders: upcoming events across the reader's groups ──
+      case 'groups.events.reminders': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const g = await dbFor('groups');
+        const groupIds: string[] = [];
+        const kindOf = new Map<string, string>();
+        for (const kind of GROUP_KINDS) {
+          const rows = await g.collection(`${kind}_members`)
+            .find({ userId: uid }, { projection: { groupId: 1 } })
+            .limit(500).toArray();
+          for (const r of rows) {
+            const id = String(r.groupId);
+            if (id) { groupIds.push(id); kindOf.set(id, kind); }
+          }
+        }
+        if (groupIds.length === 0) return ok({ events: [] });
+        const now = Date.now();
+        const rows = await g.collection('events').find({
+          groupId: { $in: groupIds },
+          at: { $ne: null, $gt: new Date(now - 3600 * 1000),
+                $lt: new Date(now + 24 * 3600 * 1000) },
+        }).limit(20).toArray();
+        const names = new Map<string, string>();
+        for (const e of rows) {
+          const gid = String(e.groupId);
+          if (!names.has(gid)) {
+            const doc = await g.collection(kindOf.get(gid) ?? 'clubs')
+              .findOne({ _id: gid } as never, { projection: { name: 1 } });
+            names.set(gid, String(doc?.name ?? ''));
+          }
+        }
+        return ok({ events: rows.map((e) => ({
+          id: String(e._id),
+          title: e.title ?? '',
+          at: e.at ?? null,
+          groupId: String(e.groupId),
+          kind: kindOf.get(String(e.groupId)) ?? 'clubs',
+          groupName: names.get(String(e.groupId)) ?? '',
+        })) });
+      }
+
+      // ── moderator: the full picture ─────────────────────────────────
+      case 'admin.insights': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can view insights', 403);
+        const now = Date.now();
+        const prefs = (await dbFor('users')).collection('user_prefs');
+        const [readers, profilesCount] = await Promise.all([
+          prefs.countDocuments({}),
+          serviceClient().from('profiles')
+            .select('id', { count: 'exact', head: true })
+            .then((r) => r.count ?? 0).catch(() => 0),
+        ]);
+        // gender + age + presence aggregates (single pass over prefs)
+        const genders: Record<string, number> = {};
+        const ages = { '13-17': 0, '18-24': 0, '25-34': 0, '35-44': 0,
+                       '45-54': 0, '55+': 0, unset: 0 };
+        let online = 0;
+        const thisYear = new Date().getUTCFullYear();
+        let withBirth = 0;
+        await prefs.find({}).limit(5000).forEach((doc) => {
+          const g = String(doc.gender ?? 'unset');
+          genders[g] = (genders[g] ?? 0) + 1;
+          const by = Number(doc.birthYear ?? 0);
+          if (by >= 1900 && by <= thisYear) {
+            withBirth++;
+            const age = thisYear - by;
+            if (age < 18) ages['13-17']++;
+            else if (age < 25) ages['18-24']++;
+            else if (age < 35) ages['25-34']++;
+            else if (age < 45) ages['35-44']++;
+            else if (age < 55) ages['45-54']++;
+            else ages['55+']++;
+          } else {
+            ages.unset++;
+          }
+          const last = doc.lastActive instanceof Date
+            ? doc.lastActive.getTime() : 0;
+          if (now - last < 5 * 60 * 1000) online++;
+        });
+        const feed = await dbFor('feed');
+        const [books, quotes, posts, reviews, news] = await Promise.all([
+          (await dbFor('books')).collection('books').countDocuments({}),
+          feed.collection('posts').countDocuments({ type: 'quote' }),
+          feed.collection('posts').countDocuments({}),
+          (await dbFor('books')).collection('reviews').countDocuments({}),
+          feed.collection('posts').countDocuments({ type: 'news' }),
+        ]);
+        const clubCounts: Record<string, number> = {};
+        for (const kind of GROUP_KINDS) {
+          clubCounts[kind] = await (await dbFor('groups'))
+            .collection(kind).countDocuments({});
+        }
+        const [messages, openReports, activeBans] = await Promise.all([
+          (await dbFor('chats')).collection('messages').countDocuments({}),
+          (await dbFor('moderation')).collection('reports')
+            .countDocuments({ status: 'open' }),
+          (await dbFor('moderation')).collection('bans')
+            .countDocuments({ active: true }),
+        ]);
+        return ok({ insights: {
+          readers, profilesCount, online, genders, ages, withBirth,
+          books, quotes, posts, reviews, news,
+          groups: clubCounts, messages, openReports, activeBans,
+          generatedAt: new Date().toISOString(),
+        } });
+      }
+
+      // ── moderator: every reader, with punishment state ───────────────
+      case 'admin.users.list': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can list readers', 403);
+        const page = Math.max(1, Number(p.page ?? 1) || 1);
+        const perPage = 100;
+        let authUsers: { users: Record<string, unknown>[]; total?: number } = {
+          users: [],
+        };
+        try {
+          const res = await serviceClient().auth.admin.listUsers({
+            page, perPage,
+          } as never);
+          authUsers = {
+            users: (res.data?.users ?? []) as Record<string, unknown>[],
+            total: undefined,
+          };
+        } catch { /* fall back to profiles rows */ }
+        if (authUsers.users.length === 0) {
+          // Auth admin unavailable — list from profiles instead so the
+          // console still shows every reader.
+          try {
+            const from = (page - 1) * perPage;
+            const pr = await serviceClient().from('profiles')
+              .select('id,username,display_name,avatar_url')
+              .order('created_at', { ascending: false })
+              .range(from, from + perPage - 1);
+            authUsers = {
+              users: (pr.data ?? []).map((r) => ({
+                id: String(r.id),
+                email: '',
+                phone: '',
+                username: r.username ?? '',
+                displayName: r.display_name ?? '',
+              })) as Record<string, unknown>[],
+            };
+          } catch { /* even profiles unreachable — empty page */ }
+        }
+        const prefsCol = (await dbFor('users')).collection('user_prefs');
+        const bansCol = (await dbFor('moderation')).collection('bans');
+        const rows = [];
+        for (const u of authUsers.users) {
+          const id = String(u.id ?? '');
+          const meta = (u.raw_user_meta_data ?? {}) as Record<string, unknown>;
+          const pref = await prefsCol.findOne({ userId: id });
+          const ban = await bansCol.findOne({ userId: id, active: true });
+          let suspended = false;
+          if (ban && ban.mode === 'suspend' &&
+              ban.until instanceof Date && ban.until.getTime() < Date.now()) {
+            suspended = false;
+          } else if (ban) {
+            suspended = true;
+          }
+          rows.push({
+            id,
+            email: String(u.email ?? ''),
+            phone: String(u.phone ?? meta.phone ?? ''),
+            username: String(meta.username ?? pref?.username ?? ''),
+            displayName: String(meta.display_name ?? ''),
+            gender: pref?.gender ?? null,
+            birthYear: pref?.birthYear ?? null,
+            country: pref?.country ?? null,
+            lastActive: pref?.lastActive ?? null,
+            createdAt: u.created_at ?? null,
+            lastSignIn: u.last_sign_in_at ?? null,
+            banned: ban ? String(ban.mode ?? 'ban') : null,
+            banReason: ban ? String(ban.reason ?? '') : null,
+            banUntil: ban?.until ?? null,
+          });
+        }
+        return ok({ users: rows, page });
+      }
+
+      // ── moderator: mass message to every reader ──────────────────────
+      case 'admin.massMessage': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can broadcast', 403);
+        const title = String(p.title ?? '').trim().slice(0, 120);
+        const body = String(p.body ?? '').trim().slice(0, 2000);
+        if (!title || !body) return fail('A title and a message are required');
+        const doc = { title, body, sentBy: uid, createdAt: new Date() };
+        const col = (await dbFor('moderation')).collection('mass_messages');
+        await col.insertOne({ ...doc });
+        // Only the latest 10 are kept — it is a broadcast, not an inbox.
+        const keep = await col.find({}).sort({ createdAt: -1 })
+          .limit(10).toArray();
+        const keepIds = keep.map((r) => r._id);
+        await col.deleteMany({ _id: { $nin: keepIds } } as never);
+        await logAdmin(uid, 'massMessage', { title });
+        return ok({ sent: true });
+      }
+
+      case 'mass.latest': {
+        const rows = await (await dbFor('moderation'))
+          .collection('mass_messages')
+          .find({}).sort({ createdAt: -1 }).limit(1).toArray();
+        if (rows.length === 0) return ok({ message: null });
+        const r = rows[0];
+        return ok({ message: {
+          id: String(r._id),
+          title: r.title ?? '',
+          body: r.body ?? '',
+          at: r.createdAt ?? null,
+        } });
+      }
+
+      // ── reader: presence heartbeat + own punishment state ────────────
+      case 'me.heartbeat': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        await (await dbFor('users')).collection('user_prefs').updateOne(
+          { userId: uid },
+          { $set: { lastActive: new Date() }, $setOnInsert: { userId: uid } },
+          { upsert: true },
+        );
+        return ok({ ok: true });
+      }
+
+      case 'me.status': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        return ok({ punishment: await activePunishment(uid) });
+      }
+
+      // ── reader: mirror the phone into auth (dashboard column) ────────
+      case 'me.syncPhone': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const phone = String(p.phone ?? '').trim();
+        if (!/^\+?[0-9]{7,15}$/.test(phone)) {
+          return fail('A valid phone number is required');
+        }
+        try {
+          await serviceClient().auth.admin.updateUserById(uid, {
+            phone: phone.startsWith('+') ? phone : `+${phone}`,
+          } as never);
+          return ok({ synced: true });
+        } catch {
+          return fail('Could not sync the phone number right now', 503);
+        }
+      }
+
+      // ── chat: shared media / docs / links / files ────────────────────
+      case 'chat.shared': {
+        void sweepOldMessages();
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const conversationId = typeof p.conversationId === 'string'
+          ? p.conversationId : '';
+        if (!isHexId(conversationId)) {
+          return fail('A valid conversationId is required');
+        }
+        const room = await (await dbFor('chats'))
+          .collection('conversations')
+          .findOne({ _id: new ObjectId(conversationId) });
+        if (!room) return fail('Conversation not found', 404);
+        if (room.type === 'dm') {
+          const memberIds = (room.memberIds as string[]) ?? [];
+          if (!memberIds.includes(uid)) {
+            return fail('This conversation is not yours', 403);
+          }
+        } else if (String(room.unitId ?? '')) {
+          if (!(await isUnitMember(String(room.unitId), uid))) {
+            return fail('Join this department to browse its files', 403);
+          }
+        } else if (room.type === 'club') {
+          if (!(await isClubMember(
+              String(room.kind), String(room.clubId), uid))) {
+            return fail('Join this group to browse its files', 403);
+          }
+        } else {
+          return fail('Conversation not found', 404);
+        }
+        const col = (await dbFor('chats')).collection('messages');
+        const base = { conversationId } as Record<string, unknown>;
+        const media = await col.find(
+          { ...base, type: 'image', mediaUrl: { $ne: null } })
+          .sort({ _id: -1 }).limit(120).toArray();
+        const files = await col.find(
+          { ...base, type: { $in: ['file', 'video'] },
+            mediaUrl: { $ne: null } })
+          .sort({ _id: -1 }).limit(120).toArray();
+        const linkRows = await col.find(
+          { ...base, text: { $regex: 'https?://', $options: 'i' } })
+          .sort({ _id: -1 }).limit(80).toArray();
+        const view = (m: MsgRow) => messageView(m);
+        return ok({
+          media: media.map((m) => view(m as MsgRow)),
+          files: files.map((m) => view(m as MsgRow)),
+          links: linkRows.map((m) => view(m as MsgRow)),
+        });
+      }
+
+      case 'books.stats': {
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const d = await dbFor('books');
+        const book = await d.collection('books')
+          .findOne({ _id: bookOid(String(p.bookId)) });
+        if (!book) return fail('Book not found', 404);
+        const view = bookView(book as Record<string, unknown>);
+        const recent = await d.collection('reviews')
+          .find({ bookId: p.bookId as string })
+          .sort({ createdAt: -1 }).limit(5).toArray();
+        return ok({ stats: view, recentReviews: recent.map((r) => ({
+          id: String(r._id),
+          userName: r.userName ?? 'Reader',
+          rating: Number(r.rating ?? 0),
+          body: r.body ?? '',
+          createdAt: r.createdAt,
+        })) });
+      }
+
+      case 'books.bookmarked': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const d = await dbFor('social');
+        const marks = await d.collection('book_bookmarks')
+          .find({ userId: uid }).sort({ createdAt: -1 }).limit(100).toArray();
+        const ids = marks.map((m) => String(m.bookId));
+        if (ids.length === 0) return ok({ books: [] });
+        const books = await (await dbFor('books')).collection('books')
+          .find({ _id: { $in: ids.map((id) => bookOid(id)) } })
+          .toArray();
+        const byId = new Map(books.map((b) => [String(b._id), b]));
+        const ordered = marks
+          .map((m) => byId.get(m.bookId))
+          .filter((b) => b != null)
+          .map((b) => bookView(b as Record<string, unknown>));
+        return ok({ books: ordered });
+      }
+
+      case 'chapters.save': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const bookId = p.bookId as string;
+        const chapterNumber = Math.round(Number(p.chapterNumber ?? 1)) || 1;
+        const title = String(p.title ?? `Chapter ${chapterNumber}`).slice(0, 200);
+        const content = String(p.content ?? '').slice(0, 500_000);
+        const d = await dbFor('books');
+        const book = await d.collection('books')
+          .findOne({ _id: bookOid(bookId) }, { projection: { authorId: 1 } });
+        if (!book) return fail('Book not found', 404);
+        if (book.authorId !== uid) return fail('Only the author can edit chapters', 403);
+        await d.collection('chapters').updateOne(
+          { bookId, chapterNumber },
+          { $set: { title, content, updatedAt: new Date() }, $setOnInsert: { bookId, chapterNumber, createdAt: new Date() } },
+          { upsert: true },
+        );
+        const total = await d.collection('chapters').countDocuments({ bookId });
+        await d.collection('books')
+          .updateOne({ _id: book._id }, { $set: { chaptersCount: total, updatedAt: new Date() } });
+        return ok({ saved: true, chaptersCount: total });
+      }
+
+      case 'chapters.delete': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const bookId = p.bookId as string;
+        const chapterNumber = Math.round(Number(p.chapterNumber ?? 0));
+        const d = await dbFor('books');
+        const book = await d.collection('books')
+          .findOne({ _id: bookOid(bookId) }, { projection: { authorId: 1 } });
+        if (!book) return fail('Book not found', 404);
+        if (book.authorId !== uid) return fail('Only the author can edit chapters', 403);
+        const removed = await d.collection('chapters')
+          .deleteOne({ bookId, chapterNumber });
+        return ok({ deleted: removed.deletedCount > 0 });
+      }
+
+      // ── reviews: delete own ──────────────────────────────────────────────
+      case 'reviews.delete': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const bookId = p.bookId as string;
+        const d = await dbFor('reviews');
+        const existing = await d.collection('reviews').findOne({ bookId, userId: uid });
+        if (!existing) return ok({ deleted: false });
+        await d.collection('reviews').deleteOne({ _id: existing._id });
+        await (await dbFor('books')).collection('books').updateOne(
+          { _id: bookOid(bookId) },
+          { $inc: { reviewCount: -1, ratingSum: -Number(existing.rating ?? 0) } },
+        );
+        return ok({ deleted: true });
+      }
+
+      // ── comments (book discussions) ──────────────────────────────────────
+      case 'comments.create': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const body = String(p.body ?? '').trim().slice(0, 2000);
+        if (!body) return fail('Comment text is empty');
+        const d = await dbFor('reviews');
+        const now = new Date();
+        const doc = {
+          bookId: p.bookId as string,
+          userId: uid,
+          userName: String(p.displayName ?? 'Reader').slice(0, 80),
+          body,
+          createdAt: now,
+        };
+        const inserted = await d.collection('comments').insertOne({ ...doc });
+        return ok({ comment: { id: String(inserted.insertedId), ...doc } });
+      }
+
+      case 'comments.list': {
+        if (!isAnyId(p.bookId)) return fail('A valid bookId is required');
+        const limit = Math.min(Number(p.limit ?? 30) || 30, 50);
+        const rows = await (await dbFor('reviews')).collection('comments')
+          .find({ bookId: p.bookId as string })
+          .sort({ createdAt: -1 }).limit(limit).toArray();
+        return ok({
+          comments: rows.map((c) => ({
+            id: String(c._id),
+            userId: c.userId,
+            userName: c.userName ?? 'Reader',
+            body: c.body ?? '',
+            createdAt: c.createdAt,
+          })),
+        });
+      }
+
+      // ── moderation: user reports ─────────────────────────────────────────
+      case 'moderation.report': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const targetType = ['book', 'user', 'comment', 'review', 'post']
+          .includes(String(p.targetType)) ? String(p.targetType) : null;
+        const reason = String(p.reason ?? '').trim().slice(0, 80);
+        if (!targetType || !reason) return fail('targetType and reason are required');
+        await (await dbFor('moderation')).collection('reports').insertOne({
+          targetType,
+          targetId: String(p.targetId ?? '').slice(0, 128),
+          reporterId: uid,
+          reason,
+          details: String(p.details ?? '').slice(0, 1000),
+          status: 'open',
+          createdAt: new Date(),
+        });
+        return ok({ reported: true });
+      }
+
+      // ── FCM device tokens ──────────────────────────────────────────────
+      case 'push.register': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const token = String(p.token ?? '').trim().slice(0, 4096);
+        if (!token) return fail('A device token is required');
+        await (await dbFor('users')).collection('push_tokens').updateOne(
+          { token },
+          { $set: {
+            userId: uid, token,
+            platform: String(p.platform ?? 'android'),
+            updatedAt: new Date(),
+          } },
+          { upsert: true },
+        );
+        return ok({ registered: true });
+      }
+
+      case 'push.unregister': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const token = String(p.token ?? '').trim();
+        if (token) {
+          await (await dbFor('users')).collection('push_tokens')
+            .deleteOne({ token, userId: uid });
+        }
+        return ok({ removed: true });
+      }
+
+      // ── E2EE key directory (public keys only — privates never travel) ──
+      case 'keys.publish': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const pub = String(p.pub ?? '').trim().slice(0, 400);
+        if (!pub.startsWith('BNK1:')) return fail('Malformed key');
+        await (await dbFor('users')).collection('dm_keys').updateOne(
+          { userId: uid },
+          { $set: { userId: uid, pub, updatedAt: new Date() } },
+          { upsert: true },
+        );
+        return ok({ published: true });
+      }
+
+      case 'keys.fetch': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const target = String(p.userId ?? '');
+        if (!isAnyId(target)) return fail('A valid userId is required');
+        const row = await (await dbFor('users')).collection('dm_keys')
+          .findOne({ userId: target });
+        return ok({ pub: row?.pub ?? null });
+      }
+
+      // ── overall moderator: the report queue and admin deletion ─────────
+      case 'moderation.list': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can view reports', 403);
+        const status = String(p.status ?? 'open');
+        const rows = await (await dbFor('moderation')).collection('reports')
+          .find({ status: status === 'resolved' ? 'resolved' : 'open' })
+          .sort({ createdAt: -1 }).limit(Math.min(Number(p.limit ?? 100) || 100, 200))
+          .toArray();
+        return ok({
+          reports: rows.map((r) => ({
+            id: String(r._id),
+            kind: r.kind,
+            targetId: r.targetId,
+            reason: r.reason,
+            details: r.details ?? '',
+            reporterId: r.reporterId,
+            status: r.status ?? 'open',
+            createdAt: r.createdAt,
+          })),
+        });
+      }
+
+      case 'moderation.resolve': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can resolve reports', 403);
+        const id = String(p.reportId ?? '');
+        if (!isHexId(id)) return fail('A valid reportId is required');
+        const outcome = p.outcome === 'dismissed' ? 'dismissed' : 'resolved';
+        const res = await (await dbFor('moderation')).collection('reports').updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: 'resolved', outcome,
+            resolvedBy: uid, resolvedAt: new Date() } },
+        );
+        if (res.matchedCount === 0) return fail('Report not found', 404);
+        return ok({ resolved: true, outcome });
+      }
+
+      case 'admin.deleteContent': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can delete content', 403);
+        const kind = String(p.kind ?? '');
+        const id = String(p.targetId ?? '');
+        if (!isHexId(id)) return fail('A valid targetId is required');
+        const feedDb = await dbFor('feed');
+        if (kind === 'post') {
+          await feedDb.collection('posts').deleteOne({ _id: new ObjectId(id) });
+          await feedDb.collection('post_comments').deleteMany({ postId: id });
+          await feedDb.collection('post_views').deleteMany({ postId: id });
+          await feedDb.collection('post_reshares').deleteMany({ postId: id });
+          await (await dbFor('social')).collection('post_likes').deleteMany({ postId: id });
+          return ok({ deleted: true, kind });
+        }
+        if (kind === 'message') {
+          await (await dbFor('chats')).collection('messages')
+            .deleteOne({ _id: new ObjectId(id) });
+          return ok({ deleted: true, kind });
+        }
+        if (kind === 'review') {
+          await (await dbFor('reviews')).collection('reviews')
+            .deleteOne({ _id: new ObjectId(id) });
+          return ok({ deleted: true, kind });
+        }
+        if (kind === 'comment') {
+          const c = await feedDb.collection('post_comments')
+            .findOne({ _id: new ObjectId(id) });
+          await feedDb.collection('post_comments').deleteOne({ _id: new ObjectId(id) });
+          if (c) {
+            await feedDb.collection('posts').updateOne(
+              { _id: String(c.postId) } as never,
+              { $inc: { commentCount: -1 } });
+          }
+          return ok({ deleted: true, kind });
+        }
+        return fail('Unknown content kind');
+      }
+
+      // ── reader / author mode (Facebook-style profile switch) ────────────
+      case 'profile.mode.get': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const target = typeof p.userId === 'string' && p.userId ? p.userId : uid;
+        const row = await (await dbFor('users')).collection('profile_extras')
+          .findOne({ userId: target });
+        return ok({ mode: String(row?.mode ?? 'reader') });
+      }
+
+      case 'profile.mode.set': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const mode = p.mode === 'author' ? 'author' : 'reader';
+        await (await dbFor('users')).collection('profile_extras').updateOne(
+          { userId: uid },
+          { $set: { userId: uid, mode, updatedAt: new Date() } },
+          { upsert: true },
+        );
+        return ok({ mode });
+      }
+
+      // ── overall moderator: readers, books, gems, stats, audit ──────────
+      case 'admin.bans': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can view bans', 403);
+        const rows = await (await dbFor('moderation')).collection('bans')
+          .find({ active: true }).sort({ at: -1 }).limit(200).toArray();
+        return ok({
+          bans: rows.map((r) => ({
+            userId: r.userId, reason: r.reason ?? '',
+            at: r.at, by: r.bannedBy ?? null,
+          })),
+        });
+      }
+
+      case 'admin.ban': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can suspend readers', 403);
+        const target = String(p.userId ?? '');
+        if (!isAnyId(target)) return fail('A valid userId is required');
+        if (target === uid) return fail('You cannot suspend yourself');
+        const reason = String(p.reason ?? '').trim().slice(0, 300);
+        const mode = p.mode === 'suspend' ? 'suspend' : 'ban';
+        const days = Math.max(1, Math.min(365, Number(p.days ?? 7) || 7));
+        const until = mode === 'suspend'
+          ? new Date(Date.now() + days * 24 * 3600 * 1000)
+          : null;
+        await (await dbFor('moderation')).collection('bans').updateOne(
+          { userId: target },
+          { $set: {
+            userId: target, reason, mode,
+            until, active: true,
+            bannedBy: uid, at: new Date(),
+          } },
+          { upsert: true },
+        );
+        // Enforced at the identity layer too: banned readers lose their
+        // session refresh; suspended ones for the suspension window.
+        try {
+          const hours = mode === 'ban'
+            ? '876000h'
+            : String(days * 24) + 'h';
+          await serviceClient().auth.admin.updateUserById(target, {
+            ban_duration: hours,
+          } as never);
+        } catch { /* app-level gate still holds */ }
+        await logAdmin(uid, mode, { target, reason, days: mode === 'suspend' ? days : null });
+        return ok({ banned: true, mode, until });
+      }
+
+      case 'admin.unban': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can lift suspensions', 403);
+        const target = String(p.userId ?? '');
+        if (!isAnyId(target)) return fail('A valid userId is required');
+        await (await dbFor('moderation')).collection('bans').updateOne(
+          { userId: target },
+          { $set: { active: false, unbannedBy: uid, unbannedAt: new Date() } },
+        );
+        try {
+          await serviceClient().auth.admin.updateUserById(target, {
+            ban_duration: 'none',
+          } as never);
+        } catch { /* already clear */ }
+        await logAdmin(uid, 'unban', { target });
+        return ok({ banned: false });
+      }
+
+      case 'admin.gems': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can adjust gems', 403);
+        const target = String(p.userId ?? '');
+        if (!isAnyId(target)) return fail('A valid userId is required');
+        const delta = Math.max(-10_000, Math.min(10_000,
+          Math.round(Number(p.delta ?? 0))));
+        if (!delta) return fail('An amount is required');
+        const reason = String(p.reason ?? 'moderator adjustment')
+          .trim().slice(0, 120);
+        const balance = await grantGems(target, delta, `admin:${reason}`);
+        await logAdmin(uid, 'gems', { target, delta, reason });
+        return ok({ balance });
+      }
+
+      case 'admin.deleteBook': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can delete books', 403);
+        const id = String(p.bookId ?? '');
+        if (!isHexId(id)) return fail('A valid bookId is required');
+        const booksDb = await dbFor('books');
+        const book = await booksDb.collection('books')
+          .findOne({ _id: new ObjectId(id) });
+        if (!book) return fail('Book not found', 404);
+        await booksDb.collection('chapters').deleteMany({ bookId: id });
+        await booksDb.collection('books').deleteOne({ _id: new ObjectId(id) });
+        await logAdmin(uid, 'deleteBook', { id, title: book.title ?? '' });
+        return ok({ deleted: true });
+      }
+
+      case 'admin.feature': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can feature books', 403);
+        const id = String(p.bookId ?? '');
+        if (!isHexId(id)) return fail('A valid bookId is required');
+        const on = p.on !== false;
+        await (await dbFor('books')).collection('books').updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { featuredAt: on ? new Date() : null } },
+        );
+        await logAdmin(uid, on ? 'feature' : 'unfeature', { id });
+        return ok({ featured: on });
+      }
+
+      case 'admin.stats': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can view stats', 403);
+        const dayAgo = ObjectId.createFromTime(
+          Math.floor((Date.now() - 24 * 3600 * 1000) / 1000));
+        const [openReports, activeBans, books, posts, messages24h] =
+          await Promise.all([
+            (await dbFor('moderation')).collection('reports')
+              .countDocuments({ status: 'open' }),
+            (await dbFor('moderation')).collection('bans')
+              .countDocuments({ active: true }),
+            (await dbFor('books')).collection('books').countDocuments({}),
+            (await dbFor('feed')).collection('posts').countDocuments({}),
+            (await dbFor('chats')).collection('messages')
+              .countDocuments({ _id: { $gte: dayAgo } }),
+          ]);
+        let readers = 0;
+        try {
+          const profs = await serviceClient().from('profiles')
+            .select('id', { count: 'exact', head: true });
+          readers = profs.count ?? 0;
+        } catch { /* stats stay partial */ }
+        const audit = await (await dbFor('moderation')).collection('admin_log')
+          .find({}).sort({ createdAt: -1 }).limit(40).toArray();
+        return ok({
+          stats: { openReports, activeBans, books, posts, messages24h, readers },
+          audit: audit.map((r) => ({
+            id: String(r._id),
+            action: r.action,
+            detail: r.detail ?? {},
+            adminId: r.adminId,
+            createdAt: r.createdAt,
+          })),
+        });
+      }
+
+      // ── dynamic genres: the moderator curates the shelves ────────────────
+      case 'genres.list': {
+        const rows = await (await dbFor('genres')).collection('genres')
+          .find({}).sort({ createdAt: 1 }).toArray();
+        if (rows.length === 0) {
+          return ok({
+            bookGenres: DEFAULT_BOOK_GENRES,
+            clubGenres: DEFAULT_CLUB_GENRES,
+          });
+        }
+        const bookGenres: string[] = [];
+        const clubGenres: string[] = [];
+        let sawBook = false;
+        let sawClub = false;
+        for (const g of rows) {
+          if (g.kind === 'club') {
+            sawClub = true;
+            clubGenres.push(String(g.name));
+          } else {
+            sawBook = true;
+            bookGenres.push(String(g.name));
+          }
+        }
+        if (!sawBook) bookGenres.push(...DEFAULT_BOOK_GENRES);
+        if (!sawClub) clubGenres.push(...DEFAULT_CLUB_GENRES);
+        return ok({ bookGenres, clubGenres });
+      }
+
+      case 'admin.genre.add': {
+        const uid = await adminUserId(req);
+        if (!uid) return fail('Only the overall moderator can add genres', 403);
+        const name = String(p.name ?? '').replace(/\s+/g, ' ').trim();
+        const kind = p.kind === 'club' ? 'club' : 'book';
+        if (name.length < 2 || name.length > 40) {
+          return fail('Genre names are 2-40 characters');
+        }
+        const col = (await dbFor('genres')).collection('genres');
+        await ensureGenresMaterialized();
+        const nameLower = name.toLowerCase();
+        if (await col.findOne({ kind, nameLower })) {
+          return fail('That genre is already in the list');
+        }
+        await col.insertOne({ kind, name, nameLower, createdAt: new Date() });
+        await logAdmin(uid, 'genre.add', { kind, name });
+        return ok({ added: name });
+      }
+
+      case 'admin.genre.remove': {
+        const uid = await adminUserId(req);
+        if (!uid) {
+          return fail('Only the overall moderator can remove genres', 403);
+        }
+        const name = String(p.name ?? '').trim();
+        const kind = p.kind === 'club' ? 'club' : 'book';
+        if (!name) return fail('A genre name is required');
+        const col = (await dbFor('genres')).collection('genres');
+        await ensureGenresMaterialized();
+        const res = await col
+          .deleteOne({ kind, nameLower: name.toLowerCase() });
+        if (res.deletedCount === 0) return fail('No such genre in the list');
+        await logAdmin(uid, 'genre.remove', { kind, name });
+        return ok({ removed: name });
+      }
+
+      // ── background link (no Google): revocable device passes ─────────────
+      case 'link.pass': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const col = (await dbFor('users')).collection('link_passes');
+        const now = new Date();
+        const existing = await col.findOne(
+          { userId: uid, revoked: false, expiresAt: { $gt: now } },
+          { sort: { createdAt: -1 } },
+        );
+        if (existing) return ok({ pass: existing.passId, me: uid });
+        const bytes = crypto.getRandomValues(new Uint8Array(32));
+        const passId =
+          [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+        await col.insertOne({
+          passId,
+          userId: uid,
+          revoked: false,
+          createdAt: now,
+          expiresAt: new Date(now.getTime() + 30 * 24 * 3600 * 1000),
+        });
+        return ok({ pass: passId, me: uid });
+      }
+
+      case 'link.revoke': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        await (await dbFor('users')).collection('link_passes')
+          .updateMany({ userId: uid }, { $set: { revoked: true } });
+        return ok({ revoked: true });
+      }
+
+      case 'link.names': {
+        const uid =
+          (await currentUserId(req)) ?? await userIdFromLinkPass(p.linkPass);
+        if (!uid) return fail('Sign in required', 401);
+        const ids = Array.isArray(p.ids)
+          ? p.ids.map(String).filter(isHexId).slice(0, 60)
+          : [];
+        const names: Record<string, string> = {};
+        if (ids.length > 0) {
+          try {
+            const { data: rows } = await serviceClient().from('profiles')
+              .select('id, display_name, username').in('id', ids);
+            for (const row of rows ?? []) {
+              names[String(row.id)] =
+                String(row.display_name || row.username || '');
+            }
+          } catch { /* names stay empty; the banner still works */ }
+        }
+        return ok({ names });
+      }
+
+      // ── server-side link previews (phones are blocked by bot shields) ──
+      case 'link.preview': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const raw = String(p.url ?? '').trim();
+        let target: URL;
+        try {
+          target = new URL(raw);
+        } catch {
+          return fail('A valid URL is required');
+        }
+        if (target.protocol !== 'https:' && target.protocol !== 'http:') {
+          return fail('Only http and web links can be previewed');
+        }
+        const host = target.hostname.toLowerCase();
+        if (host === 'localhost' || host.endsWith('.internal') ||
+            host.endsWith('.local') || /^127\./.test(host) ||
+            /^10\./.test(host) || /^192\.168\./.test(host) ||
+            /^169\.254\./.test(host) || /^0\./.test(host) ||
+            /^172\.(1[6-9]|2[0-9]|3[01])\./.test(host)) {
+          return fail('That link cannot be previewed');
+        }
+        try {
+          const res = await fetch(target.toString(), {
+            headers: {
+              'user-agent': 'Mozilla/5.0 (compatible; BookNestBot/1.0; +https://booknest.app)',
+              'accept': 'text/html,application/xhtml+xml',
+            },
+            redirect: 'follow',
+            signal: AbortSignal.timeout(6000),
+          });
+          const contentType = res.headers.get('content-type') ?? '';
+          if (!res.ok || !contentType.includes('text/html')) {
+            return ok({ preview: null });
+          }
+          const body = (await res.text()).slice(0, 400_000);
+          const decode = (v: string) => v
+            .replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+            .replace(/&#0?39;|&#x27;|&apos;/g, "'").replace(/&nbsp;/g, ' ')
+            .replace(/\s+/g, ' ').trim();
+          const meta = (prop: string): string | null => {
+            const patterns = [
+              new RegExp('property=["\']' + prop + '["\'][^>]*content=["\']([^"\']+)', 'i'),
+              new RegExp('content=["\']([^"\']+)["\'][^>]*property=["\']' + prop + '["\']', 'i'),
+              new RegExp('name=["\']' + prop + '["\'][^>]*content=["\']([^"\']+)', 'i'),
+            ];
+            for (const re of patterns) {
+              const m = body.match(re);
+              if (m && m[1]) return decode(m[1]).slice(0, 300);
+            }
+            return null;
+          };
+          const titleTag = body.match(/<title[^>]*>([^<]*)<\/title>/i);
+          let imageUrl = meta('og:image') ?? meta('twitter:image');
+          if (imageUrl && imageUrl.startsWith('/')) {
+            imageUrl = `${target.protocol}//${target.host}${imageUrl}`;
+          }
+          const preview = {
+            url: res.url || target.toString(),
+            title: meta('og:title') ?? meta('twitter:title') ??
+              (titleTag ? decode(titleTag[1]).slice(0, 200) : null) ?? host,
+            description: meta('og:description') ?? meta('description'),
+            imageUrl,
+            host,
+          };
+          return ok({ preview });
+        } catch {
+          return ok({ preview: null });
+        }
+      }
+
+      // ── launch: community safety — blocks, account deletion ──────────
+      // (reports live in the single moderation.report case above; the
+      // duplicate here used to silently win and reject the app's fields)
+
+      case 'dm.blocklist': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const rows = await (await dbFor('moderation')).collection('blocks')
+          .find({ userId: uid }).toArray();
+        return ok({ blocked: rows.map((r) => String(r.blockedId)) });
+      }
+
+      case 'dm.block': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const target = typeof p.peerId === 'string' ? p.peerId : '';
+        if (!target || target === uid) return fail('A valid reader is required');
+        await (await dbFor('moderation')).collection('blocks').updateOne(
+          { userId: uid, blockedId: target },
+          { $set: { userId: uid, blockedId: target, createdAt: new Date() } },
+          { upsert: true },
+        );
+        return ok({ blocked: true });
+      }
+
+      case 'dm.unblock': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const target = typeof p.peerId === 'string' ? p.peerId : '';
+        if (!target) return fail('A valid reader is required');
+        await (await dbFor('moderation')).collection('blocks').deleteOne(
+          { userId: uid, blockedId: target });
+        return ok({ blocked: false });
+      }
+
+      // Full account deletion: the reader's data goes, the auth user goes.
+      // Every delete is best-effort and continues even if one store is empty.
+      case 'account.delete': {
+        const uid = await currentUserId(req);
+        if (!uid) return fail('Sign in required', 401);
+        const removed: Record<string, number> = {};
+        const counts = async (label: string, task: Promise<unknown>) => {
+          try {
+            const result = await task as { deletedCount?: number } | null;
+            removed[label] = result?.deletedCount ?? 0;
+          } catch (_) { removed[label] = 0; }
+        };
+        const booksDb = await dbFor('books');
+        const social = await dbFor('social');
+        const feed = await dbFor('feed');
+        const reviews = await dbFor('reviews');
+        const chats = await dbFor('chats');
+        const users = await dbFor('users');
+        const moderation = await dbFor('moderation');
+        try {
+          await users.collection('link_passes')
+            .updateMany({ userId: uid }, { $set: { revoked: true } });
+        } catch { /* passes may not exist yet */ }
+        // Chapters hang off the books — collect ids before the books go.
+        const owned = await booksDb.collection('books')
+          .find({ authorId: uid }, { projection: { _id: 1 } }).toArray();
+        const ownedIds = owned.map((b) => b._id);
+        await counts('books', booksDb.collection('books').deleteMany({ authorId: uid }));
+        if (ownedIds.length > 0) {
+          await counts('chapters', booksDb.collection('chapters')
+            .deleteMany({ bookId: { $in: ownedIds } }));
+        }
+        await counts('book_likes', social.collection('book_likes').deleteMany({ userId: uid }));
+        await counts('book_bookmarks', social.collection('book_bookmarks').deleteMany({ userId: uid }));
+        await counts('book_views', social.collection('book_views').deleteMany({ userId: uid }));
+        await counts('user_stats', social.collection('user_stats').deleteMany({ userId: uid }));
+        await counts('follows', social.collection('follows').deleteMany({ $or: [{ followerId: uid }, { followeeId: uid }] }));
+        await counts('post_likes', social.collection('post_likes').deleteMany({ userId: uid }));
+        await counts('posts', feed.collection('posts').deleteMany({ createdBy: uid }));
+        await counts('post_views', feed.collection('post_views').deleteMany({ userId: uid }));
+        await counts('post_reshares', feed.collection('post_reshares').deleteMany({ userId: uid }));
+        await counts('post_comments', feed.collection('post_comments').deleteMany({ userId: uid }));
+        await counts('reviews', reviews.collection('reviews').deleteMany({ userId: uid }));
+        await counts('review_comments', reviews.collection('comments').deleteMany({ userId: uid }));
+        await counts('messages', chats.collection('messages').deleteMany({ senderId: uid }));
+        await counts('conversations', chats.collection('conversations').deleteMany({ memberIds: uid }));
+        await counts('gem_ledger', users.collection('gem_ledger').deleteMany({ userId: uid }));
+        await counts('blocks', moderation.collection('blocks').deleteMany({ $or: [{ userId: uid }, { blockedId: uid }] }));
+        await counts('reports', moderation.collection('reports').deleteMany({ reporterId: uid }));
+        // The profile row and the auth account itself.
+        let profileGone = false;
+        let authGone = false;
+        try {
+          const del = await serviceClient().from('profiles').delete().eq('id', uid);
+          profileGone = !del.error;
+        } catch (_) { profileGone = false; }
+        try {
+          const del = await serviceClient().auth.admin.deleteUser(uid);
+          authGone = !del.error;
+        } catch (_) { authGone = false; }
+        if (!profileGone || !authGone) {
+          return fail('Deletion could not finish — please try again in a moment');
+        }
+        return ok({ deleted: true, removed });
+      }
+
+      default:
+        return fail(`Unknown action: ${action}`, 404);
+    }
+  } catch (error) {
+    console.error(`action ${action} failed:`, error);
+    return fail(error instanceof Error ? error.message : 'Server error', 500);
+  }
+});

@@ -1,0 +1,16 @@
+Live probe of the deployed booknest-api — 2026-10-21T06:09:44Z
+("Sign in required" = the action EXISTS on the server;
+ "Unknown action" = the deployed file predates it;
+ ping's  field shows the deployed file's version)
+
+ping               → <no answer>
+admin.users.list   → <no answer>
+moderation.list    → <no answer>
+moderation.report  → <no answer>
+dm.react           → <no answer>
+chat.react         → <no answer>
+dm.deleteMessage   → <no answer>
+chat.deleteMessage → <no answer>
+feed.like          → <no answer>
+books.list         → <no answer>
+dictionary.search  → <no answer>
