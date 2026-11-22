@@ -9,6 +9,7 @@ import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
 import 'package:ripple/services/supabase_service.dart';
 import 'package:ripple/core/utils/auth_guard.dart';
+import 'package:ripple/presentation/components/share_sheet.dart';
 
 class ReelDetailScreen extends StatefulWidget {
   final String reelId;
@@ -22,6 +23,7 @@ class ReelDetailScreen extends StatefulWidget {
 class _ReelDetailScreenState extends State<ReelDetailScreen> {
   Map<String, dynamic>? _reel;
   List<Map<String, dynamic>> _comments = [];
+  bool _isSaved = false;
   bool _isLoading = true;
   bool _isLoadingComments = false;
   final TextEditingController _commentController = TextEditingController();
@@ -62,12 +64,32 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
           _reel = response;
           _isLoading = false;
         });
+        _loadSavedState();
         _initializeVideo();
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isLoading = false);
       }
+    }
+  }
+
+  Future<void> _loadSavedState() async {
+    final userId = SupabaseService().currentUser?.id;
+    if (userId == null) return;
+
+    try {
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableSavedPosts)
+          .select('reel_id')
+          .eq('user_id', userId)
+          .eq('reel_id', widget.reelId);
+
+      if (mounted) {
+        setState(() => _isSaved = (response as List).isNotEmpty);
+      }
+    } catch (e) {
+      // Best effort
     }
   }
 
@@ -179,7 +201,11 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
         setState(() {
           final likesCount = _reel!['likes']?['count'] ?? 0;
           _reel!['likes'] = {'count': isLiked ? likesCount - 1 : likesCount + 1};
-          _reel!['is_liked'] = !isLiked;
+          _reel!['is_liked'] = !isLiked
+              ? [
+                  {'user_id': SupabaseService().currentUser!.id}
+                ]
+              : [];
         });
       } catch (e) {
         setState(() {});
@@ -189,27 +215,53 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
 
   void _onSave() {
     AuthGuard.run(context, onAuthenticated: () async {
+      final userId = SupabaseService().currentUser?.id;
+      if (userId == null) return;
+
       try {
-        await SupabaseService().client.from(RippleConstants.tableSavedPosts).upsert({
-          'user_id': SupabaseService().currentUser!.id,
-          'reel_id': widget.reelId,
-          'created_at': DateTime.now().toIso8601String(),
-        });
+        if (_isSaved) {
+          await SupabaseService().client
+              .from(RippleConstants.tableSavedPosts)
+              .delete()
+              .eq('user_id', userId)
+              .eq('reel_id', widget.reelId);
+        } else {
+          await SupabaseService().client.from(RippleConstants.tableSavedPosts).upsert({
+            'user_id': userId,
+            'reel_id': widget.reelId,
+            'created_at': DateTime.now().toIso8601String(),
+          });
+        }
         if (mounted) {
+          setState(() => _isSaved = !_isSaved);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Reel saved'), behavior: SnackBarBehavior.floating),
+            SnackBar(
+              content: Text(_isSaved ? 'Reel saved' : 'Reel unsaved'),
+              behavior: SnackBarBehavior.floating,
+            ),
           );
         }
       } catch (e) {
-        // Ignore
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to update saved reel'),
+              backgroundColor: RippleColors.error,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
       }
     }, actionName: 'save');
   }
 
   void _onShare() {
     AuthGuard.run(context, onAuthenticated: () {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Share feature coming soon'), behavior: SnackBarBehavior.floating),
+      ShareSheet.show(
+        context,
+        link: 'ripple://reel/${widget.reelId}',
+        caption: _reel?['caption'] as String?,
+        shareText: 'Check out this reel',
       );
     }, actionName: 'share');
   }
@@ -330,8 +382,8 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
               child: Column(
                 children: [
                   _ActionButton(
-                    icon: profile?['avatar_url'] != null ? null : Icons.person_outline,
-                    avatarUrl: profile?['avatar_url'],
+                    iconAsset: 'assets/icons/heart.svg',
+                    activeIconAsset: 'assets/icons/heart_filled.svg',
                     label: _formatCount(likesCount),
                     isActive: isLiked,
                     activeColor: RippleColors.error,
@@ -339,22 +391,24 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                   ),
                   const SizedBox(height: 24),
                   _ActionButton(
-                    icon: Icons.chat_bubble_outline,
+                    iconAsset: 'assets/icons/comment.svg',
                     label: _formatCount(commentsCount),
                     onTap: () {
-                      // Comments are already visible
+                      // Comments are already visible in the sheet below
                     },
                   ),
                   const SizedBox(height: 24),
                   _ActionButton(
-                    icon: Icons.send_outlined,
+                    iconAsset: 'assets/icons/send.svg',
                     label: '',
                     onTap: _onShare,
                   ),
                   const SizedBox(height: 24),
                   _ActionButton(
-                    icon: Icons.bookmark_outline,
+                    iconAsset: 'assets/icons/bookmark.svg',
+                    activeIconAsset: 'assets/icons/bookmark_filled.svg',
                     label: '',
+                    isActive: _isSaved,
                     onTap: _onSave,
                   ),
                   const SizedBox(height: 24),
@@ -679,16 +733,16 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
 }
 
 class _ActionButton extends StatelessWidget {
-  final IconData? icon;
-  final String? avatarUrl;
+  final String iconAsset;
+  final String? activeIconAsset;
   final String label;
   final bool isActive;
   final Color activeColor;
   final VoidCallback onTap;
 
   const _ActionButton({
-    this.icon,
-    this.avatarUrl,
+    required this.iconAsset,
+    this.activeIconAsset,
     required this.label,
     this.isActive = false,
     this.activeColor = Colors.white,
@@ -697,34 +751,30 @@ class _ActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final asset = isActive && activeIconAsset != null
+        ? activeIconAsset!
+        : iconAsset;
     return GestureDetector(
       onTap: onTap,
       child: Column(
         children: [
-          if (avatarUrl != null)
-            CircleAvatar(
-              radius: 26,
-              backgroundColor: Colors.white.withValues(alpha: 0.2),
-              backgroundImage: CachedNetworkImageProvider(avatarUrl!),
-            )
-          else
-            Container(
-              width: 52,
-              height: 52,
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.3),
-                shape: BoxShape.circle,
-              ),
-              child: SvgPicture.asset(
-                'assets/icons/heart.svg',
-                width: 28,
-                height: 28,
-                colorFilter: ColorFilter.mode(
-                  isActive ? activeColor : Colors.white,
-                  BlendMode.srcIn,
-                ),
+          Container(
+            width: 52,
+            height: 52,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.3),
+              shape: BoxShape.circle,
+            ),
+            child: SvgPicture.asset(
+              asset,
+              width: 28,
+              height: 28,
+              colorFilter: ColorFilter.mode(
+                isActive ? activeColor : Colors.white,
+                BlendMode.srcIn,
               ),
             ),
+          ),
           if (label.isNotEmpty) ...[
             const SizedBox(height: 4),
             Text(

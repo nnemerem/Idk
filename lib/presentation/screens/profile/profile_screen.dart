@@ -125,17 +125,31 @@ class _ProfileScreenState extends State<ProfileScreen>
       final currentUserId = SupabaseService().currentUser?.id;
       if (currentUserId == null) return;
 
-      final response = await SupabaseService().client
+      final postResponse = await SupabaseService().client
           .from(RippleConstants.tableSavedPosts)
           .select('post_id, posts:posts(*)')
           .eq('user_id', currentUserId)
           .order('created_at', ascending: false);
 
+      final savedPosts = (postResponse as List)
+          .where((row) => row['posts'] != null)
+          .map((row) => row['posts'] as Map<String, dynamic>)
+          .toList();
+
+      final reelResponse = await SupabaseService().client
+          .from(RippleConstants.tableSavedPosts)
+          .select('reel_id, reels:reels(*)')
+          .eq('user_id', currentUserId)
+          .order('created_at', ascending: false);
+
+      final savedReels = (reelResponse as List)
+          .where((row) => row['reels'] != null)
+          .map((row) => {...(row['reels'] as Map<String, dynamic>), '_isReel': true})
+          .toList();
+
       if (mounted) {
         setState(() {
-          _savedPosts = List<Map<String, dynamic>>.from(
-            (response as List).map((row) => (row['posts'] ?? row) as Map<String, dynamic>),
-          );
+          _savedPosts = [...savedPosts, ...savedReels];
         });
       }
     } catch (e) {
@@ -512,7 +526,13 @@ class _ProfileScreenState extends State<ProfileScreen>
         physics: const NeverScrollableScrollPhysics(),
         shrinkWrap: true,
         itemCount: _savedPosts.length,
-        itemBuilder: (context, index) => _buildGridItem(_savedPosts[index]),
+        itemBuilder: (context, index) {
+          final item = _savedPosts[index];
+          if (item['_isReel'] == true) {
+            return _buildReelGridItem(item);
+          }
+          return _buildGridItem(item);
+        },
       );
     }
     return Center(
@@ -527,14 +547,14 @@ class _ProfileScreenState extends State<ProfileScreen>
           ),
           const SizedBox(height: 16),
           Text(
-            'No saved posts',
+            'No saved items',
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
               color: RippleColors.textSecondary,
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            'Posts you save will appear here.',
+            'Posts and Reels you save will appear here.',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               color: RippleColors.textTertiary,
             ),

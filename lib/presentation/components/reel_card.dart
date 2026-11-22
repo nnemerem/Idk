@@ -15,6 +15,7 @@ typedef ProfileTapCallback = void Function(String username);
 class ReelCard extends StatefulWidget {
   final Map<String, dynamic> reel;
   final bool isCurrent;
+  final bool isSaved;
   final LikeCallback onLike;
   final SaveCallback onSave;
   final ShareCallback onShare;
@@ -25,6 +26,7 @@ class ReelCard extends StatefulWidget {
     super.key,
     required this.reel,
     required this.isCurrent,
+    this.isSaved = false,
     required this.onLike,
     required this.onSave,
     required this.onShare,
@@ -208,10 +210,8 @@ class _ReelCardState extends State<ReelCard> {
             child: Column(
               children: [
                 _ActionButton(
-                  icon: profile?['avatar_url'] != null
-                      ? null
-                      : Icons.person_outline,
-                  avatarUrl: profile?['avatar_url'],
+                  iconAsset: 'assets/icons/heart.svg',
+                  activeIconAsset: 'assets/icons/heart_filled.svg',
                   label: _formatCount(likesCount),
                   isActive: isLiked,
                   activeColor: RippleColors.error,
@@ -222,20 +222,22 @@ class _ReelCardState extends State<ReelCard> {
                 ),
                 const SizedBox(height: 24),
                 _ActionButton(
-                  icon: Icons.chat_bubble_outline,
+                  iconAsset: 'assets/icons/comment.svg',
                   label: _formatCount(commentsCount),
                   onTap: () => widget.onComment(widget.reel['id'] as String),
                 ),
                 const SizedBox(height: 24),
                 _ActionButton(
-                  icon: Icons.send_outlined,
+                  iconAsset: 'assets/icons/send.svg',
                   label: '',
                   onTap: () => widget.onShare(widget.reel['id'] as String),
                 ),
                 const SizedBox(height: 24),
                 _ActionButton(
-                  icon: Icons.bookmark_outline,
+                  iconAsset: 'assets/icons/bookmark.svg',
+                  activeIconAsset: 'assets/icons/bookmark_filled.svg',
                   label: '',
+                  isActive: widget.isSaved,
                   onTap: () => widget.onSave(widget.reel['id'] as String),
                 ),
                 const SizedBox(height: 24),
@@ -374,16 +376,16 @@ class _ReelCardState extends State<ReelCard> {
 }
 
 class _ActionButton extends StatelessWidget {
-  final IconData? icon;
-  final String? avatarUrl;
+  final String iconAsset;
+  final String? activeIconAsset;
   final String label;
   final bool isActive;
   final Color activeColor;
   final VoidCallback onTap;
 
   const _ActionButton({
-    this.icon,
-    this.avatarUrl,
+    required this.iconAsset,
+    this.activeIconAsset,
     required this.label,
     this.isActive = false,
     this.activeColor = Colors.white,
@@ -392,34 +394,30 @@ class _ActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final asset = isActive && activeIconAsset != null
+        ? activeIconAsset!
+        : iconAsset;
     return GestureDetector(
       onTap: onTap,
       child: Column(
         children: [
-          if (avatarUrl != null)
-            CircleAvatar(
-              radius: 26,
-              backgroundColor: Colors.white.withValues(alpha: 0.2),
-              backgroundImage: CachedNetworkImageProvider(avatarUrl!),
-            )
-          else
-            Container(
-              width: 52,
-              height: 52,
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.3),
-                shape: BoxShape.circle,
-              ),
-              child: SvgPicture.asset(
-                'assets/icons/heart.svg',
-                width: 28,
-                height: 28,
-                colorFilter: ColorFilter.mode(
-                  isActive ? activeColor : Colors.white,
-                  BlendMode.srcIn,
-                ),
+          Container(
+            width: 52,
+            height: 52,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.3),
+              shape: BoxShape.circle,
+            ),
+            child: SvgPicture.asset(
+              asset,
+              width: 28,
+              height: 28,
+              colorFilter: ColorFilter.mode(
+                isActive ? activeColor : Colors.white,
+                BlendMode.srcIn,
               ),
             ),
+          ),
           if (label.isNotEmpty) ...[
             const SizedBox(height: 4),
             Text(

@@ -35,7 +35,7 @@ class _UserProfileScreenState extends State<UserProfileScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 2, vsync: this);
     _loadProfile();
   }
 
@@ -265,7 +265,6 @@ class _UserProfileScreenState extends State<UserProfileScreen>
                             tabs: const [
                               Tab(icon: SvgPicture.asset('assets/icons/grid_on.svg', width: 24, height: 24)),
                               Tab(icon: SvgPicture.asset('assets/icons/video_library.svg', width: 24, height: 24)),
-                              Tab(icon: SvgPicture.asset('assets/icons/person_outline.svg', width: 24, height: 24)),
                             ],
                           ),
                         ),
@@ -277,7 +276,6 @@ class _UserProfileScreenState extends State<UserProfileScreen>
                         children: [
                           _buildPostsGrid(),
                           _buildReelsGrid(),
-                          _buildTaggedGrid(),
                         ],
                       ),
                     ],
@@ -591,28 +589,6 @@ class _UserProfileScreenState extends State<UserProfileScreen>
     );
   }
 
-  Widget _buildTaggedGrid() {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SvgPicture.asset(
-            'assets/icons/person_outline.svg',
-            width: 64,
-            height: 64,
-            colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'No tagged posts',
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-              color: RippleColors.textSecondary,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   Widget _buildGridItem(Map<String, dynamic> post) {
     final mediaUrls = _getMediaUrls(post);

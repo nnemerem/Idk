@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
+import 'package:timeago/timeago.dart' as timeago;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:ripple/config/theme.dart';
@@ -174,7 +175,9 @@ class _StoryViewerState extends State<StoryViewer>
   }
 
   void _startProgress() {
-    _progressController.forward(from: 0).then((_) {
+    // Resume from the current progress position rather than restarting,
+    // so pausing mid-story keeps the same position on resume.
+    _progressController.forward(from: _progressController.value).then((_) {
       if (!_isPaused && mounted) {
         _nextStory();
       }
@@ -216,8 +219,10 @@ class _StoryViewerState extends State<StoryViewer>
       backgroundColor: Colors.black,
       body: GestureDetector(
         onTapDown: (_) => _handleTapDown,
-        onTapUp: (_) => _handleTapUp,
-        onLongPressStart: (_) => setState(() => _isPaused = true),
+        onLongPressStart: (_) {
+          setState(() => _isPaused = true);
+          _progressController.stop();
+        },
         onLongPressEnd: (_) => setState(() {
           _isPaused = false;
           _startProgress();
@@ -247,6 +252,7 @@ class _StoryViewerState extends State<StoryViewer>
                   avatarUrl: profile?['avatar_url'],
                   caption: story['caption'] as String?,
                   timestamp: story['created_at'] as String?,
+                  isPaused: _isPaused,
                 );
               },
             ),
@@ -334,8 +340,6 @@ class _StoryViewerState extends State<StoryViewer>
       _nextStory();
     }
   }
-
-  void _handleTapUp(TapUpDetails details) {}
 
   Widget _buildStoryHeader(Map<String, dynamic> story) {
     final profile = story['profiles'] as Map<String, dynamic>?;
@@ -502,6 +506,7 @@ class _StoryContent extends StatelessWidget {
   final String? avatarUrl;
   final String? caption;
   final String? timestamp;
+  final bool isPaused;
 
   const _StoryContent({
     this.mediaUrl,
@@ -511,13 +516,14 @@ class _StoryContent extends StatelessWidget {
     this.avatarUrl,
     this.caption,
     this.timestamp,
+    this.isPaused = false,
   });
 
   @override
   Widget build(BuildContext context) {
     return Center(
       child: mediaType == 'video' && mediaUrl != null
-          ? _VideoStoryPlayer(videoUrl: mediaUrl!)
+          ? _VideoStoryPlayer(videoUrl: mediaUrl!, isPaused: isPaused)
           : mediaUrl != null
               ? CachedNetworkImage(
                   imageUrl: mediaUrl,
@@ -555,8 +561,9 @@ class _StoryContent extends StatelessWidget {
 
 class _VideoStoryPlayer extends StatefulWidget {
   final String videoUrl;
+  final bool isPaused;
 
-  const _VideoStoryPlayer({required this.videoUrl});
+  const _VideoStoryPlayer({required this.videoUrl, this.isPaused = false});
 
   @override
   State<_VideoStoryPlayer> createState() => _VideoStoryPlayerState();
@@ -564,6 +571,7 @@ class _VideoStoryPlayer extends StatefulWidget {
 
 class _VideoStoryPlayerState extends State<_VideoStoryPlayer> {
   late final VideoPlayerController _controller;
+  bool _isInitialized = false;
 
   @override
   void initState() {
@@ -571,11 +579,27 @@ class _VideoStoryPlayerState extends State<_VideoStoryPlayer> {
     _controller = VideoPlayerController.networkUrl(Uri.parse(widget.videoUrl))
       ..initialize().then((_) {
         if (mounted) {
-          setState(() {});
-          _controller.play();
-          _controller.setLooping(true);
+          setState(() {
+            _isInitialized = true;
+            if (!widget.isPaused) {
+              _controller.play();
+            }
+            _controller.setLooping(true);
+          });
         }
       });
+  }
+
+  @override
+  void didUpdateWidget(covariant _VideoStoryPlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isPaused != widget.isPaused) {
+      if (widget.isPaused) {
+        _controller.pause();
+      } else {
+        _controller.play();
+      }
+    }
   }
 
   @override
@@ -586,7 +610,7 @@ class _VideoStoryPlayerState extends State<_VideoStoryPlayer> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_controller.value.isInitialized) {
+    if (!_isInitialized || !_controller.value.isInitialized) {
       return Center(
         child: CircularProgressIndicator(
           color: RippleColors.primary,
