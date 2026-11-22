@@ -15,31 +15,29 @@ jobs:
     name: Build Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    container:
-      image: cirrusci/flutter:3.19.6
-      options: --user root
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Fix DNS
+        run: |
+          echo "108.157.235.202 pub.dev" | sudo tee -a /etc/hosts
+          echo "108.157.235.202 storage.googleapis.com" | sudo tee -a /etc/hosts
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.19.6'
+          channel: 'stable'
+          cache: true
+
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
           cache: 'gradle'
-
-      - name: Verify secrets
-        run: |
-          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
-            echo "::error::SUPABASE_URL and SUPABASE_ANON_KEY secrets must be set!"
-            exit 1
-          fi
-          echo "✅ Secrets verified"
-
-      - name: Show Flutter version
-        run: flutter --version
 
       - name: Install dependencies
         run: flutter pub get
