@@ -26,11 +26,6 @@ jobs:
           flutter-version: '3.24.3'
           channel: 'stable'
 
-      - name: Fix DNS for pub.dev (after Flutter setup)
-        run: |
-          echo "108.157.235.202 pub.dev" | sudo tee -a /etc/hosts
-          echo "108.157.235.202 storage.googleapis.com" | sudo tee -a /etc/hosts
-
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
