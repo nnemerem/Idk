@@ -418,6 +418,41 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                 ),
               ),
 
+            // Top controls
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      IconButton(
+                        icon: SvgPicture.asset(
+                          'assets/icons/arrow_back.svg',
+                          width: 26,
+                          height: 26,
+                          colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                        ),
+                        onPressed: () => context.pop(),
+                      ),
+                      IconButton(
+                        icon: SvgPicture.asset(
+                          'assets/icons/more_vert.svg',
+                          width: 26,
+                          height: 26,
+                          colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                        ),
+                        onPressed: _showReelOptions,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
             // Right side actions
             Positioned(
               right: 16,
@@ -563,6 +598,127 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
         ),
       ),
     );
+  }
+
+  bool get _isOwner {
+    final currentUserId = SupabaseService().currentUser?.id;
+    return currentUserId != null && _reel?['user_id'] == currentUserId;
+  }
+
+  void _showReelOptions() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        constraints: const BoxConstraints(maxHeight: 400),
+        decoration: BoxDecoration(
+          color: RippleColors.surface,
+          borderRadius: const BorderRadius.vertical(
+            top: Radius.circular(RippleConstants.borderRadiusXLarge),
+          ),
+        ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: SvgPicture.asset('assets/icons/flag.svg', width: 24, height: 24),
+                title: const Text('Report'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Thanks — our team reviews reports'),
+                      behavior: SnackBarBehavior.floating,
+                    ),
+                  );
+                },
+              ),
+              if (_isOwner)
+                ListTile(
+                  leading: SvgPicture.asset(
+                    'assets/icons/delete.svg',
+                    width: 24,
+                    height: 24,
+                    colorFilter: ColorFilter.mode(RippleColors.error, BlendMode.srcIn),
+                  ),
+                  title: Text(
+                    'Delete reel',
+                    style: TextStyle(color: RippleColors.error),
+                  ),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    _confirmDeleteReel();
+                  },
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _confirmDeleteReel() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: RippleColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
+        ),
+        title: const Text('Delete reel?'),
+        content: const Text(
+          'This cannot be undone. Likes and comments on the reel will be removed.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _onDeleteReel();
+            },
+            child: Text(
+              'Delete',
+              style: TextStyle(color: RippleColors.error),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _onDeleteReel() async {
+    AuthGuard.run(context, onAuthenticated: () async {
+      final currentUserId = SupabaseService().currentUser?.id;
+      if (currentUserId == null || _reel == null) return;
+      try {
+        await SupabaseService().client
+            .from(RippleConstants.tableReels)
+            .delete()
+            .eq('id', widget.reelId)
+            .eq('user_id', currentUserId);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Reel deleted'), behavior: SnackBarBehavior.floating),
+          );
+          context.pop();
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to delete reel'),
+              backgroundColor: RippleColors.error,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      }
+    }, actionName: 'delete');
   }
 
   Widget _buildCommentsPanel() {

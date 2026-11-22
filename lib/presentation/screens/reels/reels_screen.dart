@@ -36,6 +36,13 @@ class _ReelsScreenState extends State<ReelsScreen> {
   }
 
   @override
+  void didPopNext() {
+    super.didPopNext();
+    _loadReels(refresh: true);
+    _loadSavedReels();
+  }
+
+  @override
   void dispose() {
     _pageController.dispose();
     super.dispose();

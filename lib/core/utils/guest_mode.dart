@@ -48,6 +48,7 @@ class GuestMode {
       'follow',
       'message',
       'edit_profile',
+      'delete',
     ];
     return authRequiredActions.contains(action);
   }

@@ -39,6 +39,13 @@ class _ProfileScreenState extends State<ProfileScreen>
   }
 
   @override
+  void didPopNext() {
+    super.didPopNext();
+    _loadProfile();
+    _loadSavedPosts();
+  }
+
+  @override
   void dispose() {
     _tabController.dispose();
     super.dispose();

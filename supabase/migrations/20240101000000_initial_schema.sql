@@ -364,3 +364,11 @@ CREATE POLICY "Users insert own story views" ON story_views FOR INSERT WITH CHEC
 -- the client for other users (e.g. when someone likes your post). Without it
 -- RLS silently rejected every insert.
 CREATE POLICY "Authenticated users can create notifications" ON notifications FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
+
+-- Post delete: decrement posts_count (called when an owner deletes a post).
+CREATE OR REPLACE FUNCTION decrement_posts_count(user_id UUID)
+RETURNS void AS $$
+BEGIN
+  UPDATE profiles SET posts_count = GREATEST(posts_count - 1, 0) WHERE id = user_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;

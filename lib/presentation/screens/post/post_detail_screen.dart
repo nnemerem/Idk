@@ -649,7 +649,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
               height: 28,
             ),
             onPressed: () {
-              // Scroll to comments
+              setState(() => _showAllComments = !_showAllComments);
             },
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
@@ -679,6 +679,84 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
         ],
       ),
     );
+  }
+
+  bool get _isOwner {
+    final currentUserId = SupabaseService().currentUser?.id;
+    return currentUserId != null && _post?['user_id'] == currentUserId;
+  }
+
+  void _confirmDeletePost() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: RippleColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
+        ),
+        title: const Text('Delete post?'),
+        content: const Text(
+          'This cannot be undone. Your likes, comments, and saves will be removed.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _onDeletePost();
+            },
+            child: Text(
+              'Delete',
+              style: TextStyle(color: RippleColors.error),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _onDeletePost() async {
+    AuthGuard.run(context, onAuthenticated: () async {
+      final currentUserId = SupabaseService().currentUser?.id;
+      if (currentUserId == null || _post == null) return;
+      try {
+        await SupabaseService().client
+            .from(RippleConstants.tablePosts)
+            .delete()
+            .eq('id', widget.postId)
+            .eq('user_id', currentUserId);
+
+        // Best effort counter decrement
+        try {
+          await SupabaseService().client.rpc(
+            'decrement_posts_count',
+            params: {'user_id': currentUserId},
+          );
+        } catch (_) {
+          // Counter is cosmetic
+        }
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Post deleted'), behavior: SnackBarBehavior.floating),
+          );
+          context.pop();
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to delete post'),
+              backgroundColor: RippleColors.error,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      }
+    }, actionName: 'delete');
   }
 
   void _showPostOptions() {
@@ -718,6 +796,23 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                   );
                 },
               ),
+              if (_isOwner)
+                ListTile(
+                  leading: SvgPicture.asset(
+                    'assets/icons/delete.svg',
+                    width: 24,
+                    height: 24,
+                    colorFilter: ColorFilter.mode(RippleColors.error, BlendMode.srcIn),
+                  ),
+                  title: Text(
+                    'Delete post',
+                    style: TextStyle(color: RippleColors.error),
+                  ),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    _confirmDeletePost();
+                  },
+                ),
             ],
           ),
         ),
