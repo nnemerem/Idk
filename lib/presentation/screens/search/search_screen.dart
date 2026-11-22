@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -24,6 +26,7 @@ class _SearchScreenState extends State<SearchScreen> {
   bool _isSearching = false;
   String _selectedTab = 'Top';
   final Set<String> _followingIds = {};
+  Timer? _debounceTimer;
 
   final List<String> _tabs = ['Top', 'Accounts', 'Reels'];
 
@@ -32,19 +35,50 @@ class _SearchScreenState extends State<SearchScreen> {
     super.initState();
     _focusNode.requestFocus();
     _searchController.addListener(_onSearchChanged);
+    _loadFollowingIds();
   }
 
   @override
   void dispose() {
+    _debounceTimer?.cancel();
     _searchController.dispose();
     _focusNode.dispose();
     super.dispose();
   }
 
+  Future<void> _loadFollowingIds() async {
+    if (GuestMode.isGuestMode) return;
+
+    final currentUserId = SupabaseService().currentUser?.id;
+    if (currentUserId == null) return;
+
+    try {
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableFollows)
+          .select('following_id')
+          .eq('follower_id', currentUserId);
+
+      if (mounted) {
+        setState(() {
+          _followingIds.addAll(
+            (response as List)
+                .map((row) => row['following_id'] as String?)
+                .whereType<String>(),
+          );
+        });
+      }
+    } catch (e) {
+      // Best effort — follow buttons still work
+    }
+  }
+
   void _onSearchChanged() {
     final query = _searchController.text.trim();
+    _debounceTimer?.cancel();
     if (query.length >= 2) {
-      _search(query);
+      _debounceTimer = Timer(const Duration(milliseconds: 400), () {
+        if (mounted) _search(query);
+      });
     } else {
       setState(() {
         _users.clear();
