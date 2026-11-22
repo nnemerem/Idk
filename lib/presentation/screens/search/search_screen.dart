@@ -25,7 +25,7 @@ class _SearchScreenState extends State<SearchScreen> {
   String _selectedTab = 'Top';
   final Set<String> _followingIds = {};
 
-  final List<String> _tabs = ['Top', 'Accounts', 'Tags', 'Places', 'Reels'];
+  final List<String> _tabs = ['Top', 'Accounts', 'Reels'];
 
   @override
   void initState() {
@@ -259,7 +259,10 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Widget _buildSearchResults() {
-    if (_users.isEmpty && _posts.isEmpty && _reels.isEmpty) {
+    final usersVisible = _selectedTab != 'Reels' && _users.isNotEmpty;
+    final postsVisible = _selectedTab != 'Reels' && _selectedTab != 'Accounts' && _posts.isNotEmpty;
+    final reelsVisible = _selectedTab != 'Accounts' && _reels.isNotEmpty;
+    if (!usersVisible && !postsVisible && !reelsVisible) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -295,7 +298,7 @@ class _SearchScreenState extends State<SearchScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Users
-          if (_users.isNotEmpty) ...[
+          if (_selectedTab != 'Reels' && _users.isNotEmpty) ...[
             _buildSectionHeader('Accounts'),
             const SizedBox(height: 12),
             ListView.builder(
@@ -308,7 +311,7 @@ class _SearchScreenState extends State<SearchScreen> {
           ],
 
           // Posts
-          if (_posts.isNotEmpty) ...[
+          if (_selectedTab != 'Reels' && _selectedTab != 'Accounts' && _posts.isNotEmpty) ...[
             _buildSectionHeader('Posts'),
             const SizedBox(height: 12),
             GridView.builder(
@@ -327,7 +330,7 @@ class _SearchScreenState extends State<SearchScreen> {
           ],
 
           // Reels
-          if (_reels.isNotEmpty) ...[
+          if (_selectedTab != 'Accounts' && _reels.isNotEmpty) ...[
             _buildSectionHeader('Reels'),
             const SizedBox(height: 12),
             GridView.builder(
