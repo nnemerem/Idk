@@ -20,16 +20,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Fix DNS for pub.dev
-        run: |
-          echo "108.157.235.202 pub.dev" | sudo tee -a /etc/hosts
-          echo "108.157.235.202 storage.googleapis.com" | sudo tee -a /etc/hosts
-
       - name: Setup Flutter
         uses: subosito/flutter-action@v2.15.0
         with:
           flutter-version: '3.24.3'
           channel: 'stable'
+
+      - name: Fix DNS for pub.dev (after Flutter setup)
+        run: |
+          echo "108.157.235.202 pub.dev" | sudo tee -a /etc/hosts
+          echo "108.157.235.202 storage.googleapis.com" | sudo tee -a /etc/hosts
 
       - name: Setup Java
         uses: actions/setup-java@v4
