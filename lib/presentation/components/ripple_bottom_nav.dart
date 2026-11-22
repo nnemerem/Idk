@@ -48,7 +48,8 @@ class _RippleBottomNavState extends State<RippleBottomNav>
       return;
     }
 
-    // Branch indices: 0 = feed, 1 = explore, 2 = reels, 3 = dms, 4 = profile
+    // Branch indices: 0 = feed, 1 = explore, 3 = dms, 4 = profile
+    // (2 is the center create button — handled above)
     final branchIndex = switch (index) {
       0 => 0,
       1 => 1,
@@ -160,6 +161,8 @@ class _RippleBottomNavState extends State<RippleBottomNav>
     if (location.startsWith(RippleConstants.routeExplore)) return 1;
     if (location.startsWith(RippleConstants.routeDms)) return 3;
     if (location.startsWith(RippleConstants.routeProfile)) return 4;
+    // Reels are not a nav tab — highlight nothing rather than a wrong tab
+    if (location.startsWith(RippleConstants.routeReels)) return -1;
 
     return 0;
   }
