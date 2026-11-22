@@ -30,6 +30,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
   bool _isSaved = false;
   final TextEditingController _commentController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  bool _showAllComments = false;
 
   @override
   void initState() {
@@ -380,10 +381,31 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                   if (commentsCount > 0)
                     Padding(
                       padding: const EdgeInsets.all(16),
-                      child: Text(
-                        'View all $commentsCount comments',
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: RippleColors.textSecondary,
+                      child: GestureDetector(
+                        onTap: () {
+                          setState(() => _showAllComments = !_showAllComments);
+                        },
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _showAllComments
+                                  ? 'Hide comments'
+                                  : 'View all $commentsCount comments',
+                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                color: RippleColors.textSecondary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Icon(
+                              _showAllComments
+                                  ? Icons.expand_less
+                                  : Icons.expand_more,
+                              size: 20,
+                              color: RippleColors.textSecondary,
+                            ),
+                          ],
                         ),
                       ),
                     ),
@@ -394,7 +416,9 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
 
           // Comments section
           Container(
-            height: 300,
+            height: _showAllComments
+                ? MediaQuery.of(context).size.height * 0.65
+                : 300,
             decoration: BoxDecoration(
               color: RippleColors.surface,
               border: Border(top: BorderSide(color: RippleColors.divider)),
