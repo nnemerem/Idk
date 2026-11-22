@@ -5,13 +5,13 @@ class RippleConstants {
   static const String appBundleId = 'com.ripple.app';
 
   // Supabase (injected at build time via --dart-define)
-  // Using String.fromEnvironment with fallback for local dev
-  static const String supabaseUrl = String.fromEnvironment(
+  // Using static getters with String.fromEnvironment for dart-define support
+  static String get supabaseUrl => String.fromEnvironment(
     'SUPABASE_URL',
     defaultValue: 'https://your-project.supabase.co',
   );
 
-  static const String supabaseAnonKey = String.fromEnvironment(
+  static String get supabaseAnonKey => String.fromEnvironment(
     'SUPABASE_ANON_KEY',
     defaultValue: 'your-anon-key-here',
   );
