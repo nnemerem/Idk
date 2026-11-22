@@ -23,8 +23,8 @@ jobs:
       - name: Setup Flutter
         uses: flutter-actions/setup-flutter@v1
         with:
-          flutter-version: '3.22.3'
-          channel: 'stable'
+          version: '3.22.3'
+          sdk: 'flutter'
 
       - name: Setup Java
         uses: actions/setup-java@v5
