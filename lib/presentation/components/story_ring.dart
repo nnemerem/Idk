@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:video_player/video_player.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import '../config/theme.dart';
-import '../config/constants.dart';
+import 'package:ripple/config/theme.dart';
+import 'package:ripple/config/constants.dart';
 
 class StoryRing extends StatelessWidget {
   final String username;

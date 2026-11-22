@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import '../../config/theme.dart';
-import '../../config/constants.dart';
-import '../../config/router.dart';
-import '../../core/utils/guest_mode.dart';
+import 'package:ripple/config/theme.dart';
+import 'package:ripple/config/constants.dart';
+import 'package:ripple/config/router.dart';
+import 'package:ripple/core/utils/guest_mode.dart';
 
 class RippleBottomNav extends StatefulWidget {
   final StatefulNavigationShell navigationShell;
@@ -48,10 +48,19 @@ class _RippleBottomNavState extends State<RippleBottomNav>
       return;
     }
 
+    // Branch indices: 0 = feed, 1 = explore, 2 = reels, 3 = dms, 4 = profile
+    final branchIndex = switch (index) {
+      0 => 0,
+      1 => 1,
+      3 => 3,
+      4 => 4,
+      _ => 0,
+    };
+
     _animationController.forward().then((_) => _animationController.reverse());
     widget.navigationShell.goBranch(
-      index,
-      initialLocation: index == widget.navigationShell.currentIndex,
+      branchIndex,
+      initialLocation: branchIndex == widget.navigationShell.currentIndex,
     );
   }
 
@@ -76,7 +85,7 @@ class _RippleBottomNavState extends State<RippleBottomNav>
         },
         onCreateStory: () {
           context.pop();
-          context.go(RippleConstants.routeCreateStory),
+          context.go(RippleConstants.routeCreateStory);
         },
       ),
     );
@@ -149,7 +158,6 @@ class _RippleBottomNavState extends State<RippleBottomNav>
 
     if (location.startsWith(RippleConstants.routeFeed)) return 0;
     if (location.startsWith(RippleConstants.routeExplore)) return 1;
-    if (location.startsWith(RippleConstants.routeReels)) return 1; // Reels in explore tab
     if (location.startsWith(RippleConstants.routeDms)) return 3;
     if (location.startsWith(RippleConstants.routeProfile)) return 4;
 

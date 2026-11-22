@@ -1,97 +1,45 @@
-# Ripple - Quick Setup & GitHub Actions Build Guide
+# Ripple — Setup Guide
 
-## 🚀 One-Time Setup (5 minutes)
+## 1. Create a Supabase project
+1. Go to supabase.com → New Project
+2. Wait for the database to provision
+3. Project Settings → API → copy:
+   - Project URL → `SUPABASE_URL`
+   - `anon` public key → `SUPABASE_ANON_KEY`
+4. Authentication → Providers → enable **Anonymous sign-ins** (guest mode)
 
-### 1. Create Supabase Project
-1. Go to [supabase.com](https://supabase.com) → New Project
-2. Wait for database to provision (~2 min)
-3. Go to **Project Settings → API** → Copy:
-   - `Project URL` → `SUPABASE_URL`
-   - `anon/public` key → `SUPABASE_ANON_KEY`
-4. Go to **Authentication → Providers** → Enable **Anonymous sign-ins** (for Guest Mode)
+## 2. Apply the schema
+Supabase dashboard → SQL Editor → run `supabase/migrations/20240101000000_initial_schema.sql`
+Then create these public storage buckets in dashboard → Storage: `avatars`, `posts`, `reels`, `stories`
 
-### 2. Add GitHub Secrets
-In your GitHub repo: **Settings → Secrets and variables → Actions → New repository secret**
-
-| Secret Name | Value |
-|-------------|-------|
-| `SUPABASE_URL` | `https://xxxxx.supabase.co` |
-| `SUPABASE_ANON_KEY` | `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...` |
-
-### 3. Run Database Migrations
-In Supabase Dashboard → **SQL Editor** → Run the migrations from `README.md` (or run `supabase db push` if using CLI)
-
----
-
-## 📱 Get Your Build
-
-### Option A: Automatic on Tag (Recommended)
+## 3. Run the app
 ```bash
-# Create and push a version tag
-git tag v1.0.0
-git push origin v1.0.0
+./scripts/local_dev.sh
 ```
-→ Check **Actions tab** → Wait for green check → **Download artifacts** or **GitHub Release**
-
-### Option B: Manual Trigger
-1. Go to **Actions → Build Android** → **Run workflow**
-2. Select branch → **Run workflow**
-3. Wait ~5 min → **Download APK/AAB from artifacts**
-
-### Option C: Local Build (if you install Flutter)
+Or directly:
 ```bash
-flutter pub get
-flutter build apk --release  # Android
-# flutter build ipa --release  # iOS (macOS only)
+flutter run \
+  --dart-define=SUPABASE_URL=https://your-project.supabase.co \
+  --dart-define=SUPABASE_ANON_KEY=your-anon-key
 ```
 
----
-
-## 🔧 Local Development
-
+## 4. Build
 ```bash
-# 1. Copy config template
-cp lib/config/supabase_config.dart lib/config/supabase_config.local.dart
-
-# 2. Edit with YOUR credentials
-# (This file is gitignored)
-
-# 3. Run
-flutter run
+flutter build apk --release        # Android
+flutter build ios                  # iOS (macOS only)
+flutter build web --release        # Web (build/web)
+flutter build windows              # Windows (build/windows)
+flutter build linux                # Linux (build/linux)
+flutter build macos                # macOS (macOS only)
 ```
 
----
+## Troubleshooting
+- `SUPABASE_URL not set` → pass the two dart-defines or edit scripts/local_dev.sh
+- `Anonymous auth failed` → enable Anonymous provider in Supabase Auth settings
+- `Build fails on pub get` → check Flutter SDK version (3.22+)
 
-## 📦 What You Get
-
-| Artifact | Use Case |
-|----------|----------|
-| `app-arm64-v8a-release.apk` | Modern Android (64-bit) |
-| `app-armeabi-v7a-release.apk` | Older Android (32-bit) |
-| `app-x86_64-release.apk` | Android emulators |
-| `app-release.aab` | **Google Play Store upload** |
-| `Ripple.ipa` | iOS Ad Hoc / TestFlight |
-
----
-
-## 🐛 Troubleshooting
-
-| Issue | Fix |
-|-------|-----|
-| `SUPABASE_URL not set` | Add secrets in GitHub repo settings |
-| `Anonymous auth failed` | Enable Anonymous provider in Supabase Auth settings |
-| `Build fails on pub get` | Check `pubspec.yaml` for version conflicts |
-| `iOS build fails` | Requires Apple Developer account for signing |
-
----
-
-## 🎯 Next Steps After Install
-
-1. Open app → **"Check It Out"** (Guest Mode - browse only)
-2. Tap heart/comment/save → **Sign Up prompt appears**
-3. Create account → Full access (post, reel, DM, follow)
-4. Profile → **"Switch to Real Account"** to exit guest mode
-
----
-
-**Need help?** Check the Actions logs or create an issue!
+## Next steps
+1. Open the app → "Check It Out" (guest mode, browse only)
+2. Tap like/comment/save → "Sign In Required" dialog
+3. Create an account → full access
+4. Profile → "Switch to Real Account" to exit guest mode

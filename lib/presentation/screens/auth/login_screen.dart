@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../../config/theme.dart';
-import '../../config/constants.dart';
-import '../../config/router.dart';
-import '../../services/supabase_service.dart';
-import '../../core/utils/auth_guard.dart';
-import '../../core/utils/guest_mode.dart';
+import 'package:ripple/config/theme.dart';
+import 'package:ripple/config/constants.dart';
+import 'package:ripple/config/router.dart';
+import 'package:ripple/services/supabase_service.dart';
+import 'package:ripple/core/utils/auth_guard.dart';
+import 'package:ripple/core/utils/guest_mode.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});

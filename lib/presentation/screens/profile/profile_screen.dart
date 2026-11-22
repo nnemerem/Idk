@@ -1,14 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import '../../config/theme.dart';
-import '../../config/constants.dart';
-import '../../config/router.dart';
-import '../../services/supabase_service.dart';
-import '../../core/utils/guest_mode.dart';
-import '../profile/edit_profile_screen.dart';
-import '../profile/settings_screen.dart';
+import 'package:ripple/config/theme.dart';
+import 'package:ripple/config/constants.dart';
+import 'package:ripple/config/router.dart';
+import 'package:ripple/services/supabase_service.dart';
+import 'package:ripple/core/utils/guest_mode.dart';
+import 'package:ripple/presentation/screens/profile/edit_profile_screen.dart';
+import 'package:ripple/presentation/screens/profile/settings_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -33,8 +34,7 @@ class _ProfileScreenState extends State<ProfileScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
-    _loadProfile();
-    _loadPosts();
+    _loadAll();
   }
 
   @override
@@ -68,6 +68,15 @@ class _ProfileScreenState extends State<ProfileScreen>
     }
   }
 
+  Future<void> _loadAll() async {
+    await Future.wait([
+      _loadProfile(),
+      _loadPosts(),
+      _loadReels(),
+      _loadSavedPosts(),
+    ]);
+  }
+
   Future<void> _loadPosts() async {
     try {
       final currentUserId = SupabaseService().currentUser?.id;
@@ -86,6 +95,50 @@ class _ProfileScreenState extends State<ProfileScreen>
       }
     } catch (e) {
       // Ignore
+    }
+  }
+
+  Future<void> _loadReels() async {
+    try {
+      final currentUserId = SupabaseService().currentUser?.id;
+      if (currentUserId == null) return;
+
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableReels)
+          .select()
+          .eq('user_id', currentUserId)
+          .order('created_at', ascending: false);
+
+      if (mounted) {
+        setState(() {
+          _reels = List<Map<String, dynamic>>.from(response);
+        });
+      }
+    } catch (e) {
+      // Ignore
+    }
+  }
+
+  Future<void> _loadSavedPosts() async {
+    try {
+      final currentUserId = SupabaseService().currentUser?.id;
+      if (currentUserId == null) return;
+
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableSavedPosts)
+          .select('post_id, posts:posts(*)')
+          .eq('user_id', currentUserId)
+          .order('created_at', ascending: false);
+
+      if (mounted) {
+        setState(() {
+          _savedPosts = List<Map<String, dynamic>>.from(
+            (response as List).map((row) => (row['posts'] ?? row) as Map<String, dynamic>),
+          );
+        });
+      }
+    } catch (e) {
+      // Ignore — saved list is non-critical
     }
   }
 
@@ -146,7 +199,7 @@ class _ProfileScreenState extends State<ProfileScreen>
       body: _isLoading
           ? Center(child: CircularProgressIndicator(color: RippleColors.primary))
           : RefreshIndicator(
-              onRefresh: _loadProfile,
+              onRefresh: _loadAll,
               color: RippleColors.primary,
               backgroundColor: RippleColors.surface,
               child: CustomScrollView(
@@ -389,6 +442,21 @@ class _ProfileScreenState extends State<ProfileScreen>
   }
 
   Widget _buildReelsGrid() {
+    if (_reels.isNotEmpty) {
+      return GridView.builder(
+        padding: const EdgeInsets.all(2),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3,
+          crossAxisSpacing: 2,
+          mainAxisSpacing: 2,
+          childAspectRatio: 1,
+        ),
+        physics: const NeverScrollableScrollPhysics(),
+        shrinkWrap: true,
+        itemCount: _reels.length,
+        itemBuilder: (context, index) => _buildReelGridItem(_reels[index]),
+      );
+    }
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -425,6 +493,21 @@ class _ProfileScreenState extends State<ProfileScreen>
   }
 
   Widget _buildSavedGrid() {
+    if (_savedPosts.isNotEmpty) {
+      return GridView.builder(
+        padding: const EdgeInsets.all(2),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3,
+          crossAxisSpacing: 2,
+          mainAxisSpacing: 2,
+          childAspectRatio: 1,
+        ),
+        physics: const NeverScrollableScrollPhysics(),
+        shrinkWrap: true,
+        itemCount: _savedPosts.length,
+        itemBuilder: (context, index) => _buildGridItem(_savedPosts[index]),
+      );
+    }
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -465,9 +548,7 @@ class _ProfileScreenState extends State<ProfileScreen>
     )['type'] == 'video';
 
     return GestureDetector(
-      onTap: () {
-        // TODO: Navigate to post/reel detail
-      },
+      onTap: () => context.go('${RippleConstants.routeFeed}/post/${post['id']}'),
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -511,6 +592,59 @@ class _ProfileScreenState extends State<ProfileScreen>
                 ),
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReelGridItem(Map<String, dynamic> reel) {
+    final thumb = reel['thumbnail_url'] as String? ?? reel['video_url'] as String?;
+    if (thumb == null || thumb.isEmpty) return const SizedBox.shrink();
+
+    return GestureDetector(
+      onTap: () => context.go('${RippleConstants.routeReels}/reel/${reel['id']}'),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          CachedNetworkImage(
+            imageUrl: thumb,
+            fit: BoxFit.cover,
+            placeholder: (context, url) => Container(
+              color: RippleColors.surfaceVariant,
+              child: Center(
+                child: CircularProgressIndicator(
+                  color: RippleColors.primary,
+                  strokeWidth: 1.5,
+                ),
+              ),
+            ),
+            errorWidget: (context, url, error) => Container(
+              color: RippleColors.surfaceVariant,
+              child: SvgPicture.asset(
+                'assets/icons/video_library.svg',
+                width: 32,
+                height: 32,
+                colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: 4,
+            right: 4,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.7),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: SvgPicture.asset(
+                'assets/icons/play.svg',
+                width: 14,
+                height: 14,
+                colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+              ),
+            ),
+          ),
         ],
       ),
     );

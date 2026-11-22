@@ -1,11 +1,11 @@
 {
-    "name": "BookNest",
-    "short_name": "BookNest",
+    "name": "Ripple",
+    "short_name": "Ripple",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#000000",
-    "theme_color": "#071A3D",
-    "description": "BookNest by N.O Group \u2014 The Digital Library Ecosystem for Bookworms",
+    "theme_color": "#FF6B35",
+    "description": "Ripple \u2014 Your Visual Social World",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

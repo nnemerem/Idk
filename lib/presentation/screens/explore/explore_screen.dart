@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import '../../config/theme.dart';
-import '../../config/constants.dart';
-import '../../config/router.dart';
-import '../../services/supabase_service.dart';
-import '../../core/utils/guest_mode.dart';
+import 'package:ripple/config/theme.dart';
+import 'package:ripple/config/constants.dart';
+import 'package:ripple/config/router.dart';
+import 'package:ripple/services/supabase_service.dart';
+import 'package:ripple/core/utils/guest_mode.dart';
 
 class ExploreScreen extends StatefulWidget {
   const ExploreScreen({super.key});
@@ -24,6 +25,7 @@ class _ExploreScreenState extends State<ExploreScreen>
   bool _hasMore = true;
   int _page = 0;
   static const int _perPage = 20;
+  int _selectedGridCount = 3;
   String _selectedCategory = 'For You';
 
   final List<String> _categories = [
@@ -158,12 +160,13 @@ class _ExploreScreenState extends State<ExploreScreen>
           ),
           IconButton(
             icon: SvgPicture.asset(
-              'assets/icons/grid.svg',
+              'assets/icons/grid_on.svg',
               width: 28,
               height: 28,
             ),
+            tooltip: 'Grid',
             onPressed: () {
-              // TODO: Toggle grid view
+              setState(() => _selectedGridCount = _selectedGridCount == 3 ? 2 : 3);
             },
           ),
         ],
@@ -190,8 +193,13 @@ class _ExploreScreenState extends State<ExploreScreen>
               unselectedLabelColor: RippleColors.textSecondary,
               tabs: _categories.map((cat) => Tab(text: cat)).toList(),
               onTap: (index) {
+                final category = _categories[index];
+                if (category == 'Reels') {
+                  context.go(RippleConstants.routeReels);
+                  return;
+                }
                 setState(() {
-                  _selectedCategory = _categories[index];
+                  _selectedCategory = category;
                   _posts.clear();
                   _page = 0;
                   _hasMore = true;
@@ -211,8 +219,8 @@ class _ExploreScreenState extends State<ExploreScreen>
               child: GridView.builder(
                 controller: _scrollController,
                 padding: const EdgeInsets.all(2),
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 3,
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: _selectedGridCount,
                   crossAxisSpacing: 2,
                   mainAxisSpacing: 2,
                   childAspectRatio: 1,
@@ -241,12 +249,7 @@ class _ExploreScreenState extends State<ExploreScreen>
 
     return GestureDetector(
       onTap: () {
-        // Navigate to post detail or reel
-        if (isVideo) {
-          // TODO: Navigate to reel
-        } else {
-          // TODO: Navigate to post
-        }
+        context.go('${RippleConstants.routeFeed}/post/${post['id']}');
       },
       child: Stack(
         fit: StackFit.expand,

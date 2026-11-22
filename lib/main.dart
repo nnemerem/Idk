@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'config/theme.dart';
-import 'config/router.dart';
-import 'config/constants.dart';
-import 'services/supabase_service.dart';
+import 'package:ripple/config/theme.dart';
+import 'package:ripple/config/router.dart';
+import 'package:ripple/config/constants.dart';
+import 'package:ripple/services/supabase_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();

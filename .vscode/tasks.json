@@ -1,10 +1,10 @@
 {
-  // Click-to-run commands for GitHub Codespaces / VS Code.
+  // Click-to-run commands for VS Code.
   // Terminal → Run Task… (or Ctrl+Shift+P → "Tasks: Run Task").
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "BookNest: run (web)",
+      "label": "Ripple: run (web)",
       "type": "shell",
       "command": "flutter run -d web-server --web-hostname 0.0.0.0 --web-port 8080",
       "isBackground": true,
@@ -15,13 +15,13 @@
       }
     },
     {
-      "label": "BookNest: fetch packages",
+      "label": "Ripple: fetch packages",
       "type": "shell",
       "command": "flutter pub get",
       "problemMatcher": []
     },
     {
-      "label": "BookNest: analyze code",
+      "label": "Ripple: analyze code",
       "type": "shell",
       "command": "flutter analyze --no-fatal-infos --no-fatal-warnings",
       "problemMatcher": []

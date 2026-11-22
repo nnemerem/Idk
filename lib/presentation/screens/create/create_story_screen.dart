@@ -5,9 +5,9 @@ import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:video_player/video_player.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import '../../config/theme.dart';
-import '../../config/constants.dart';
-import '../../services/supabase_service.dart';
+import 'package:ripple/config/theme.dart';
+import 'package:ripple/config/constants.dart';
+import 'package:ripple/services/supabase_service.dart';
 
 class CreateStoryScreen extends StatefulWidget {
   const CreateStoryScreen({super.key});

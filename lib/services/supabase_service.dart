@@ -1,5 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../config/constants.dart';
+import 'package:ripple/config/constants.dart';
 
 class SupabaseService {
   SupabaseService._internal();

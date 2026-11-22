@@ -18,10 +18,7 @@ migrate_working_dir/
 *.iws
 .idea/
 
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
+# VS Code is versioned on purpose (launch configs and tasks)
 
 # Flutter/Dart/Pub related
 **/doc/api/
@@ -39,25 +36,23 @@ app.*.symbols
 # Obfuscation related
 app.*.map.json
 
-# Android Studio will place build artifacts here
+# Android build artifacts
 /android/app/debug
 /android/app/profile
 /android/app/release
-# Signing identity — tracked today for shared CI/local signatures; moves to
-# CI secrets at publish rotation (see CHECKLIST.md). Once untracked, these
-# lines keep them out forever.
-/android/key/booknest-release.jks
-/android/key/booknest-keystore.properties
 
-# ── BookNest secrets — real credentials NEVER enter Git ──────────────────
+# Android release signing — credentials never enter Git
+/android/key/
+/android/key.properties
+**/*.jks
+**/*.keystore
+
+# Environment / secrets — real credentials NEVER enter Git
 .env
 .env.*
-backend/secrets.local.env
+**/secrets.local.env
 
 # Supabase CLI local artifacts
 supabase/.branches/
 supabase/.temp/
 supabase/.deno/
-
-# Local Supabase config (contains credentials - never commit!)
-lib/config/supabase_config.dart

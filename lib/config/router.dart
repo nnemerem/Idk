@@ -1,28 +1,29 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../core/utils/auth_guard.dart';
-import '../core/utils/guest_mode.dart';
-import '../presentation/screens/auth/login_screen.dart';
-import '../presentation/screens/auth/register_screen.dart';
-import '../presentation/screens/auth/splash_screen.dart';
-import '../presentation/screens/feed/feed_screen.dart';
-import '../presentation/screens/reels/reels_screen.dart';
-import '../presentation/screens/explore/explore_screen.dart';
-import '../presentation/screens/dms/dms_list_screen.dart';
-import '../presentation/screens/profile/profile_screen.dart';
-import '../presentation/screens/create/create_post_screen.dart';
-import '../presentation/screens/create/create_reel_screen.dart';
-import '../presentation/screens/create/create_story_screen.dart';
-import '../presentation/screens/post/post_detail_screen.dart';
-import '../presentation/screens/reels/reel_detail_screen.dart';
-import '../presentation/screens/profile/user_profile_screen.dart';
-import '../presentation/screens/chat/chat_screen.dart';
-import '../presentation/screens/search/search_screen.dart';
-import '../presentation/screens/settings/settings_screen.dart';
-import '../presentation/screens/profile/edit_profile_screen.dart';
-import '../presentation/components/ripple_bottom_nav.dart';
-import 'constants.dart';
+import 'package:ripple/core/utils/auth_guard.dart';
+import 'package:ripple/core/utils/guest_mode.dart';
+import 'package:ripple/presentation/screens/auth/login_screen.dart';
+import 'package:ripple/presentation/screens/auth/register_screen.dart';
+import 'package:ripple/presentation/screens/auth/splash_screen.dart';
+import 'package:ripple/presentation/screens/feed/feed_screen.dart';
+import 'package:ripple/presentation/screens/reels/reels_screen.dart';
+import 'package:ripple/presentation/screens/explore/explore_screen.dart';
+import 'package:ripple/presentation/screens/dms/dms_list_screen.dart';
+import 'package:ripple/presentation/screens/profile/profile_screen.dart';
+import 'package:ripple/presentation/screens/create/create_post_screen.dart';
+import 'package:ripple/presentation/screens/create/create_reel_screen.dart';
+import 'package:ripple/presentation/screens/create/create_story_screen.dart';
+import 'package:ripple/presentation/screens/post/post_detail_screen.dart';
+import 'package:ripple/presentation/screens/reels/reel_detail_screen.dart';
+import 'package:ripple/presentation/screens/profile/user_profile_screen.dart';
+import 'package:ripple/presentation/screens/chat/chat_screen.dart';
+import 'package:ripple/presentation/screens/search/search_screen.dart';
+import 'package:ripple/presentation/screens/notifications/notifications_screen.dart';
+import 'package:ripple/presentation/screens/profile/settings_screen.dart';
+import 'package:ripple/presentation/screens/profile/edit_profile_screen.dart';
+import 'package:ripple/presentation/components/ripple_bottom_nav.dart';
+import 'package:ripple/config/constants.dart';
 
 final GoRouter appRouter = GoRouter(
   initialLocation: RippleConstants.routeSplash,
@@ -71,6 +72,17 @@ final GoRouter appRouter = GoRouter(
           ],
         ),
 
+        // Explore branch
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: RippleConstants.routeExplore,
+              name: 'explore',
+              builder: (context, state) => const ExploreScreen(),
+            ),
+          ],
+        ),
+
         // Reels branch
         StatefulShellBranch(
           routes: [
@@ -87,17 +99,6 @@ final GoRouter appRouter = GoRouter(
                   ),
                 ),
               ],
-            ),
-          ],
-        ),
-
-        // Explore branch
-        StatefulShellBranch(
-          routes: [
-            GoRoute(
-              path: RippleConstants.routeExplore,
-              name: 'explore',
-              builder: (context, state) => const ExploreScreen(),
             ),
           ],
         ),
@@ -178,6 +179,13 @@ final GoRouter appRouter = GoRouter(
       builder: (context, state) => const SearchScreen(),
     ),
 
+    // Notifications route
+    GoRoute(
+      path: RippleConstants.routeNotifications,
+      name: 'notifications',
+      builder: (context, state) => const NotificationsScreen(),
+    ),
+
     // Public user profile (accessible from anywhere)
     GoRoute(
       path: RippleConstants.routeUserProfile,
@@ -201,6 +209,7 @@ String? _redirect(BuildContext context, GoRouterState state) {
     RippleConstants.routeReels,
     RippleConstants.routeExplore,
     RippleConstants.routeSearch,
+    RippleConstants.routeNotifications,
     RippleConstants.routeFeed + '/post/',  // Post detail
     RippleConstants.routeReels + '/reel/', // Reel detail
     RippleConstants.routeUserProfile,      // Public profiles

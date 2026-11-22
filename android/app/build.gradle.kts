@@ -15,7 +15,7 @@ if (file("google-services.json").exists()) {
 }
 
 android {
-    namespace = "com.nogroup.booknest"
+    namespace = "com.n.o_group.ripple"
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
@@ -27,26 +27,25 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.nogroup.booknest"
+        applicationId = "com.n.o_group.ripple"
         // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = 24 // camera plugin floor
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
 
-    // Stable release identity: the keystore in android/key is committed,
-    // so CI and local builds share one signature and installs update in
-    // place instead of Android treating each build as a different app.
+    // Release signing is read from android/key/keystore.properties — a file
+    // that lives OUTSIDE git (see .gitignore). CI writes it from secrets;
+    // local builds fall back to debug signing until the file exists.
     val keystoreProps = Properties().apply {
-        val f = rootProject.file("key/booknest-keystore.properties")
+        val f = rootProject.file("key/keystore.properties")
         if (f.exists()) f.inputStream().use { load(it) }
     }
 
     signingConfigs {
         if (keystoreProps.isNotEmpty()) {
-            create("booknestRelease") {
+            create("rippleRelease") {
                 storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
                 storePassword = keystoreProps.getProperty("storePassword")
                 keyAlias = keystoreProps.getProperty("keyAlias")
@@ -58,7 +57,7 @@ android {
     buildTypes {
         release {
             signingConfig = if (keystoreProps.isNotEmpty())
-                signingConfigs.getByName("booknestRelease")
+                signingConfigs.getByName("rippleRelease")
             else
                 signingConfigs.getByName("debug")
         }

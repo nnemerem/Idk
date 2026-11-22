@@ -1,17 +1,17 @@
 {
-  "name": "BookNest (Flutter)",
+  "name": "Ripple (Flutter)",
   "build": {
     "dockerfile": "Dockerfile"
   },
   "remoteUser": "vscode",
-  "postCreateCommand": "git config --global --add safe.directory /opt/flutter && flutter --version && flutter pub get && echo '' && echo '✅ BookNest is ready — Flutter installed, packages fetched. Open the Command Palette → Tasks: Run Task → BookNest: run (web).' && echo ''",
+  "postCreateCommand": "flutter --version && flutter pub get && echo '' && echo 'Ripple is ready — Flutter installed, packages fetched. Open the Command Palette → Tasks: Run Task → Ripple: run (web).' && echo ''",
   "features": {
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
   "forwardPorts": [8080],
   "portsAttributes": {
     "8080": {
-      "label": "BookNest web preview",
+      "label": "Ripple web preview",
       "onAutoForward": "openPreview"
     }
   },

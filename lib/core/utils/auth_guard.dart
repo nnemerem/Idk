@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'guest_mode.dart';
+import 'package:ripple/core/utils/guest_mode.dart';
 
 class AuthGuard {
   static bool get isAuthenticated => Supabase.instance.client.auth.currentSession != null;

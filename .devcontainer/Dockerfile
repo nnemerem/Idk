@@ -1,10 +1,17 @@
-# BookNest Codespace image.
-# Flutter is baked into the image (shallow stable clone) so the Codespace
-# starts with the SDK present; the Dart engine cache is warmed afterwards
-# by postCreateCommand running as the normal `vscode` user.
-FROM mcr.microsoft.com/devcontainers/base:jammy
+# Ripple Codespace image — Flutter SDK on Ubuntu.
+FROM mcr.microsoft.com/devcontainers/base:ubuntu
 
-RUN git clone --depth 1 -b stable https://github.com/flutter/flutter.git /opt/flutter \
-    && chown -R vscode:vscode /opt/flutter
+# Install system dependencies used by Flutter/Dart toolchain
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git unzip xz-utils zip libglu1-mesa \
+    && rm -rf /var/lib/apt/lists/*
 
-ENV PATH="/opt/flutter/bin:${PATH}"
+# Install Flutter
+ARG FLUTTER_VERSION=stable
+RUN git clone --depth 1 -b "${FLUTTER_VERSION}" https://github.com/flutter/flutter.git /opt/flutter \
+    && /opt/flutter/bin/flutter --version \
+    && echo "/opt/flutter/bin" >> /etc/profile
+
+ENV PATH="/opt/flutter/bin:$PATH"
+
+WORKDIR /workspaces/ripple

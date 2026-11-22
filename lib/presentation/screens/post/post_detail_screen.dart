@@ -5,11 +5,11 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:video_player/video_player.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import '../../config/theme.dart';
-import '../../config/constants.dart';
-import '../../services/supabase_service.dart';
-import '../../core/utils/auth_guard.dart';
-import '../../presentation/components/post_card.dart';
+import 'package:ripple/config/theme.dart';
+import 'package:ripple/config/constants.dart';
+import 'package:ripple/services/supabase_service.dart';
+import 'package:ripple/core/utils/auth_guard.dart';
+import 'package:ripple/presentation/components/post_card.dart';
 
 class PostDetailScreen extends StatefulWidget {
   final String postId;

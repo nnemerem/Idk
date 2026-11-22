@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../../config/theme.dart';
-import '../../config/constants.dart';
-import '../../config/router.dart';
-import '../../services/supabase_service.dart';
-import '../../core/utils/guest_mode.dart';
-import '../../presentation/components/reel_card.dart';
+import 'package:ripple/config/theme.dart';
+import 'package:ripple/config/constants.dart';
+import 'package:ripple/config/router.dart';
+import 'package:ripple/services/supabase_service.dart';
+import 'package:ripple/core/utils/guest_mode.dart';
+import 'package:ripple/core/utils/auth_guard.dart';
+import 'package:ripple/presentation/components/reel_card.dart';
 
 class ReelsScreen extends StatefulWidget {
   const ReelsScreen({super.key});
@@ -90,15 +92,82 @@ class _ReelsScreenState extends State<ReelsScreen> {
   }
 
   void _onLikeReel(String reelId, bool currentlyLiked) {
-    // TODO: Implement like logic
+    AuthGuard.run(context, onAuthenticated: () async {
+      try {
+        final userId = SupabaseService().currentUser!.id;
+        if (currentlyLiked) {
+          await SupabaseService().client
+              .from('reel_likes')
+              .delete()
+              .eq('reel_id', reelId)
+              .eq('user_id', userId);
+        } else {
+          await SupabaseService().client.from('reel_likes').insert({
+            'reel_id': reelId,
+            'user_id': userId,
+            'created_at': DateTime.now().toIso8601String(),
+          });
+        }
+        setState(() {
+          final index = _reels.indexWhere((r) => r['id'] == reelId);
+          if (index != -1) {
+            final likes = _reels[index]['likes'];
+            final count = likes is Map ? (likes['count'] as int? ?? 0) : 0;
+            _reels[index]['likes'] = {'count': currentlyLiked ? count - 1 : count + 1};
+            _reels[index]['is_liked'] = currentlyLiked
+                ? <Map<String, dynamic>>[]
+                : [
+                    {'user_id': SupabaseService().currentUser!.id}
+                  ];
+          }
+        });
+      } catch (e) {
+        if (mounted) setState(() {});
+      }
+    }, actionName: 'like');
   }
 
   void _onSaveReel(String reelId) {
-    // TODO: Implement save logic
+    AuthGuard.run(context, onAuthenticated: () async {
+      // Reels share the saved-posts table with posts.
+      try {
+        await SupabaseService().client.from(RippleConstants.tableSavedPosts).upsert({
+          'user_id': SupabaseService().currentUser!.id,
+          'post_id': reelId,
+          'created_at': DateTime.now().toIso8601String(),
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Reel saved'),
+              behavior: SnackBarBehavior.floating,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to save reel'),
+              backgroundColor: RippleColors.error,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      }
+    }, actionName: 'save');
   }
 
   void _onShareReel(String reelId) {
-    // TODO: Implement share logic
+    AuthGuard.run(context, onAuthenticated: () {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Shared: ripple://reel/$reelId'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }, actionName: 'share');
   }
 
   void _onCommentReel(String reelId) {
@@ -181,32 +250,6 @@ class _ReelsScreenState extends State<ReelsScreen> {
             ),
         ],
       ),
-    );
-  }
-              controller: _pageController,
-              scrollDirection: Axis.vertical,
-              itemCount: _reels.length + (_hasMore ? 1 : 0),
-              onPageChanged: _onPageChanged,
-              physics: const ClampingScrollPhysics(),
-              itemBuilder: (context, index) {
-                if (index >= _reels.length) {
-                  return _buildLoadingReel();
-                }
-
-                final reel = _reels[index];
-                final isCurrent = index == _currentIndex;
-
-                return ReelCard(
-                  reel: reel,
-                  isCurrent: isCurrent,
-                  onLike: _onLikeReel,
-                  onSave: _onSaveReel,
-                  onShare: _onShareReel,
-                  onComment: _onCommentReel,
-                  onProfileTap: _onProfileTap,
-                );
-              },
-            ),
     );
   }
 

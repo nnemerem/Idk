@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../config/constants.dart';
+import 'package:ripple/config/constants.dart';
 
 class GuestMode {
   /// Check if current session is in guest mode (anonymous auth)

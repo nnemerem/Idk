@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:timeago/timeago.dart' as timeago;
-import '../../config/theme.dart';
-import '../../config/constants.dart';
-import '../../config/router.dart';
-import '../../services/supabase_service.dart';
-import '../chat/chat_screen.dart';
+import 'package:ripple/config/theme.dart';
+import 'package:ripple/config/constants.dart';
+import 'package:ripple/config/router.dart';
+import 'package:ripple/services/supabase_service.dart';
+import 'package:ripple/services/conversation_service.dart';
 
 class DmsListScreen extends StatefulWidget {
   const DmsListScreen({super.key});
@@ -80,9 +81,7 @@ class _DmsListScreenState extends State<DmsListScreen> {
               width: 26,
               height: 26,
             ),
-            onPressed: () {
-              // TODO: New message screen
-            },
+            onPressed: () => _showNewMessageSheet(),
           ),
         ],
       ),
@@ -103,6 +102,31 @@ class _DmsListScreenState extends State<DmsListScreen> {
                     },
                   ),
                 ),
+    );
+  }
+
+  void _showNewMessageSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => _NewMessageSheet(
+        onSelectUser: (userId) async {
+          Navigator.of(context).pop();
+          final conversationId = await ConversationService.startConversation(userId);
+          if (conversationId == null) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Could not start the conversation')),
+              );
+            }
+            return;
+          }
+          if (mounted) {
+            context.go('${RippleConstants.routeDms}/chat/$conversationId');
+          }
+        },
+      ),
     );
   }
 
@@ -303,14 +327,221 @@ class _DmsListScreenState extends State<DmsListScreen> {
             ),
             const SizedBox(height: 24),
             ElevatedButton.icon(
-              onPressed: () {
-                // TODO: New message
-              },
+              onPressed: () => _showNewMessageSheet(),
               icon: SvgPicture.asset('assets/icons/edit.svg', width: 20, height: 20),
               label: const Text('Send Message'),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _NewMessageSheet extends StatefulWidget {
+  final Future<void> Function(String userId) onSelectUser;
+
+  const _NewMessageSheet({required this.onSelectUser});
+
+  @override
+  State<_NewMessageSheet> createState() => _NewMessageSheetState();
+}
+
+class _NewMessageSheetState extends State<_NewMessageSheet> {
+  final TextEditingController _controller = TextEditingController();
+  final FocusNode _focusNode = FocusNode();
+  List<Map<String, dynamic>> _users = [];
+  bool _isLoading = false;
+  String _query = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_onQueryChanged);
+    _focusNode.requestFocus();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _onQueryChanged() {
+    final query = _controller.text.trim();
+    if (query == _query) return;
+    _query = query;
+    _search(query);
+  }
+
+  Future<void> _search(String query) async {
+    if (query.length < 2) {
+      setState(() => _users = []);
+      return;
+    }
+    setState(() => _isLoading = true);
+    try {
+      final currentUserId = SupabaseService().currentUser?.id;
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableProfiles)
+          .select('id, username, display_name, avatar_url')
+          .or('username.ilike.%$query%,display_name.ilike.%$query%')
+          .neq('id', currentUserId ?? '')
+          .limit(20);
+
+      if (mounted) {
+        setState(() {
+          _users = List<Map<String, dynamic>>.from(response);
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final currentUserId = SupabaseService().currentUser?.id;
+    return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.65,
+      ),
+      decoration: BoxDecoration(
+        color: RippleColors.surface,
+        borderRadius: const BorderRadius.vertical(
+          top: Radius.circular(RippleConstants.borderRadiusXLarge),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 40,
+            height: 4,
+            margin: const EdgeInsets.symmetric(vertical: 10),
+            decoration: BoxDecoration(
+              color: RippleColors.divider,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+            child: Row(
+              children: [
+                SvgPicture.asset(
+                  'assets/icons/search.svg',
+                  width: 18,
+                  height: 18,
+                  colorFilter: ColorFilter.mode(RippleColors.textSecondary, BlendMode.srcIn),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: TextField(
+                    controller: _controller,
+                    focusNode: _focusNode,
+                    style: const TextStyle(color: RippleColors.textPrimary),
+                    decoration: const InputDecoration(
+                      hintText: 'Search people',
+                      hintStyle: TextStyle(color: RippleColors.textTertiary),
+                      border: InputBorder.none,
+                      isDense: true,
+                      contentPadding: EdgeInsets.zero,
+                      fillColor: Colors.transparent,
+                    ),
+                    textInputAction: TextInputAction.search,
+                  ),
+                ),
+                if (_query.isNotEmpty)
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 20),
+                    onPressed: () {
+                      _controller.clear();
+                      setState(() {
+                        _query = '';
+                        _users = [];
+                      });
+                    },
+                  ),
+              ],
+            ),
+          ),
+          const Divider(color: RippleColors.divider, height: 1),
+          Flexible(
+            child: _isLoading
+                ? const Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Center(
+                      child: CircularProgressIndicator(color: RippleColors.primary),
+                    ),
+                  )
+                : _query.isEmpty
+                    ? const Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Center(
+                          child: Text(
+                            'Type to search people',
+                            style: TextStyle(color: RippleColors.textSecondary),
+                          ),
+                        ),
+                      )
+                    : _users.isEmpty
+                        ? const Padding(
+                            padding: EdgeInsets.all(24),
+                            child: Center(
+                              child: Text(
+                                'No people found',
+                                style: TextStyle(color: RippleColors.textSecondary),
+                              ),
+                            ),
+                          )
+                        : ListView.builder(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            shrinkWrap: true,
+                            itemCount: _users.length,
+                            itemBuilder: (context, index) {
+                              final user = _users[index];
+                              final username = user['username'] as String? ?? 'user';
+                              final displayName = user['display_name'] as String? ?? username;
+                              final avatarUrl = user['avatar_url'] as String?;
+                              return ListTile(
+                                leading: CircleAvatar(
+                                  radius: 24,
+                                  backgroundColor: RippleColors.surfaceVariant,
+                                  backgroundImage: avatarUrl != null && avatarUrl.isNotEmpty
+                                      ? CachedNetworkImageProvider(avatarUrl)
+                                      : null,
+                                  child: avatarUrl == null || avatarUrl.isEmpty
+                                      ? Text(
+                                          username.isNotEmpty
+                                              ? username[0].toUpperCase()
+                                              : '?',
+                                          style: const TextStyle(
+                                            color: RippleColors.textPrimary,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        )
+                                      : null,
+                                ),
+                                title: Text(
+                                  displayName,
+                                  style: const TextStyle(color: RippleColors.textPrimary),
+                                ),
+                                subtitle: Text(
+                                  '@$username',
+                                  style: const TextStyle(color: RippleColors.textSecondary),
+                                ),
+                                trailing: const Icon(
+                                  Icons.chevron_right,
+                                  color: RippleColors.textTertiary,
+                                ),
+                                onTap: () => widget.onSelectUser(user['id'] as String),
+                              );
+                            },
+                          ),
+          ),
+        ],
       ),
     );
   }
