@@ -48,6 +48,7 @@ class _FeedScreenState extends State<FeedScreen> {
   void didPopNext() {
     super.didPopNext();
     _loadUnreadNotifications();
+    _loadStories();
   }
 
   Future<void> _loadUnreadNotifications() async {
