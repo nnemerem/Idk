@@ -19,6 +19,7 @@ class DmsListScreen extends StatefulWidget {
 
 class _DmsListScreenState extends State<DmsListScreen> {
   List<Map<String, dynamic>> _conversations = [];
+  final Map<String, int> _unreadCounts = {};
   bool _isLoading = true;
 
   @override
@@ -52,9 +53,14 @@ class _DmsListScreenState extends State<DmsListScreen> {
           .eq('conversation_participants.user_id', currentUserId)
           .order('updated_at', ascending: false);
 
+      final unread = await _loadUnreadCounts(currentUserId);
+
       if (mounted) {
         setState(() {
           _conversations = List<Map<String, dynamic>>.from(response);
+          _unreadCounts
+            ..clear()
+            ..addAll(unread);
           _isLoading = false;
         });
       }
@@ -62,6 +68,26 @@ class _DmsListScreenState extends State<DmsListScreen> {
       if (mounted) {
         setState(() => _isLoading = false);
       }
+    }
+  }
+
+  Future<Map<String, int>> _loadUnreadCounts(String currentUserId) async {
+    try {
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableMessages)
+          .select('conversation_id, sender_id')
+          .eq('is_read', false);
+
+      final counts = <String, int>{};
+      for (final row in (response as List)) {
+        if (row['sender_id'] == currentUserId) continue;
+        final cid = row['conversation_id'] as String?;
+        if (cid == null) continue;
+        counts[cid] = (counts[cid] ?? 0) + 1;
+      }
+      return counts;
+    } catch (e) {
+      return {};
     }
   }
 
@@ -139,7 +165,7 @@ class _DmsListScreenState extends State<DmsListScreen> {
     );
     final profile = otherParticipant?['profiles'] as Map<String, dynamic>?;
     final lastMessage = conversation['last_message'] as Map<String, dynamic>?;
-    final unreadCount = conversation['unread_count'] as int? ?? 0;
+    final unreadCount = _unreadCounts[conversation['id'] as String?] ?? 0;
 
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
