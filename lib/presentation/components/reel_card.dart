@@ -120,10 +120,12 @@ class _ReelCardState extends State<ReelCard> {
 
     return GestureDetector(
       onTap: _togglePlayPause,
-      onDoubleTap: () => widget.onLike(
-        widget.reel['id'] as String,
-        isLiked,
-      ),
+      onDoubleTap: () {
+        // Instagram parity: double-tap always likes; it never unlikes.
+        if (!isLiked) {
+          widget.onLike(widget.reel['id'] as String, false);
+        }
+      },
       child: Stack(
         fit: StackFit.expand,
         children: [
