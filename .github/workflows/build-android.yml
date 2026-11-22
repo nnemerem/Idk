@@ -46,8 +46,9 @@ jobs:
           fi
           echo "✅ Secrets verified"
 
-      - name: Flutter doctor
-        run: flutter doctor -v
+      # - name: Flutter doctor
+#   run: flutter doctor -v
+# Temporarily disabled
 
       - name: Show pubspec.yaml
         run: cat pubspec.yaml
