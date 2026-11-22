@@ -11,14 +11,6 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
-  go_router: ^17.3.0
-  supabase_flutter: ^2.3.0
-  intl: ^0.20.3
-  cached_network_image: ^3.3.0
-  image_picker: ^1.0.7
-  timeago: ^3.6.0
-  uuid: ^4.4.0
-  flutter_svg: ^2.0.10
 
 dev_dependencies:
   flutter_test:
@@ -27,6 +19,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  assets:
-    - assets/images/
-    - assets/icons/
