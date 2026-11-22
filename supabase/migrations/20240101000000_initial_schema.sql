@@ -328,3 +328,15 @@ CREATE POLICY "Users can update own notifications" ON notifications FOR UPDATE U
 -- CREATE POLICY "Authenticated upload" ON storage.objects FOR INSERT WITH CHECK (bucket_id IN ('avatars','posts','reels','stories') AND auth.uid() IS NOT NULL);
 -- CREATE POLICY "Own update" ON storage.objects FOR UPDATE USING (auth.uid() = owner);
 -- CREATE POLICY "Own delete" ON storage.objects FOR DELETE USING (auth.uid() = owner);
+-- ============================================
+-- POSTS COUNT HELPER
+-- ============================================
+-- Postgres rpc used by create_post_screen to bump profiles.posts_count
+-- after a post is inserted. SECURITY DEFINER so it works for any caller
+-- inserting their own post.
+CREATE OR REPLACE FUNCTION increment_posts_count(user_id UUID)
+RETURNS void AS $$
+BEGIN
+  UPDATE profiles SET posts_count = posts_count + 1 WHERE id = user_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
