@@ -98,25 +98,25 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     super.dispose();
   }
 
-  IconData _iconFor(String? type) {
+  String _iconFor(String? type) {
     switch (type) {
       case 'like':
       case 'post_like':
       case 'reel_like':
-        return Icons.favorite_outline;
+        return 'assets/icons/heart_filled.svg';
       case 'follow':
-        return Icons.person_add_alt_1_outlined;
+        return 'assets/icons/person_add.svg';
       case 'comment':
       case 'post_comment':
       case 'reel_comment':
-        return Icons.chat_bubble_outline;
+        return 'assets/icons/comment.svg';
       case 'mention':
       case 'tag':
-        return Icons.alternate_email_outlined;
+        return 'assets/icons/tag.svg';
       case 'share':
-        return Icons.share_outlined;
+        return 'assets/icons/send.svg';
       default:
-        return Icons.notifications_outlined;
+        return 'assets/icons/notification.svg';
     }
   }
 
@@ -225,10 +225,11 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
               color: _colorFor(type).withValues(alpha: 0.15),
               shape: BoxShape.circle,
             ),
-            child: Icon(
+            child: SvgPicture.asset(
               _iconFor(type),
-              size: 20,
-              color: _colorFor(type),
+              width: 20,
+              height: 20,
+              colorFilter: ColorFilter.mode(_colorFor(type), BlendMode.srcIn),
             ),
           ),
           const SizedBox(width: 12),

@@ -164,6 +164,26 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
           'created_at': DateTime.now().toIso8601String(),
         });
 
+        // Notify the reel owner (skip self-comments)
+        final ownerId = _reel?['user_id'] as String?;
+        if (ownerId != null && ownerId != currentUserId) {
+          try {
+            final myProfile = await SupabaseService().getProfile(currentUserId);
+            final myUsername = myProfile?['username'] as String?;
+            if (myUsername != null) {
+              await SupabaseService().createNotification(
+                targetUserId: ownerId,
+                type: 'reel_comment',
+                title: '@$myUsername',
+                body: 'commented: "$content"',
+                data: {'actor_id': currentUserId, 'reel_id': widget.reelId},
+              );
+            }
+          } catch (_) {
+            // Notification is best effort
+          }
+        }
+
         _commentController.clear();
         _loadComments();
       } catch (e) {
@@ -185,18 +205,39 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
     final isLiked = _getIsLiked();
     AuthGuard.run(context, onAuthenticated: () async {
       try {
+        final currentUserId = SupabaseService().currentUser!.id;
+        final ownerId = _reel!['user_id'] as String?;
         if (isLiked) {
           await SupabaseService().client
               .from('reel_likes')
               .delete()
               .eq('reel_id', widget.reelId)
-              .eq('user_id', SupabaseService().currentUser!.id);
+              .eq('user_id', currentUserId);
         } else {
           await SupabaseService().client.from('reel_likes').insert({
             'reel_id': widget.reelId,
-            'user_id': SupabaseService().currentUser!.id,
+            'user_id': currentUserId,
             'created_at': DateTime.now().toIso8601String(),
           });
+
+          // Notify the reel owner (skip self-likes)
+          if (ownerId != null && ownerId != currentUserId) {
+            try {
+              final myProfile = await SupabaseService().getProfile(currentUserId);
+              final myUsername = myProfile?['username'] as String?;
+              if (myUsername != null) {
+                await SupabaseService().createNotification(
+                  targetUserId: ownerId,
+                  type: 'reel_like',
+                  title: '@$myUsername',
+                  body: 'liked your reel',
+                  data: {'actor_id': currentUserId, 'reel_id': widget.reelId},
+                );
+              }
+            } catch (_) {
+              // Notification is best effort
+            }
+          }
         }
         setState(() {
           final likesCount = _reel!['likes']?['count'] ?? 0;

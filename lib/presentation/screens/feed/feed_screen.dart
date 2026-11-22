@@ -182,19 +182,44 @@ class _FeedScreenState extends State<FeedScreen> {
   void _onLikePost(String postId, bool currentlyLiked) {
     AuthGuard.run(context, onAuthenticated: () async {
       try {
+        final currentUserId = SupabaseService().currentUser!.id;
+        final postIndex = _posts.indexWhere((p) => p['id'] == postId);
+        final post = postIndex != -1 ? _posts[postIndex] : null;
+        final ownerId = post?['user_id'] as String?;
+
         if (currentlyLiked) {
           await SupabaseService().client
               .from('post_likes')
               .delete()
               .eq('post_id', postId)
-              .eq('user_id', SupabaseService().currentUser!.id);
+              .eq('user_id', currentUserId);
         } else {
           await SupabaseService().client.from('post_likes').insert({
             'post_id': postId,
-            'user_id': SupabaseService().currentUser!.id,
+            'user_id': currentUserId,
             'created_at': DateTime.now().toIso8601String(),
           });
+
+          // Notify the post owner (skip self-likes)
+          if (ownerId != null && ownerId != currentUserId) {
+            try {
+              final myProfile = await SupabaseService().getProfile(currentUserId);
+              final myUsername = myProfile?['username'] as String?;
+              if (myUsername != null) {
+                await SupabaseService().createNotification(
+                  targetUserId: ownerId,
+                  type: 'post_like',
+                  title: '@$myUsername',
+                  body: 'liked your post',
+                  data: {'actor_id': currentUserId, 'post_id': postId},
+                );
+              }
+            } catch (_) {
+              // Notification is best effort
+            }
+          }
         }
+
         // Optimistic update
         setState(() {
           final index = _posts.indexWhere((p) => p['id'] == postId);

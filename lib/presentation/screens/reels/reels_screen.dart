@@ -121,6 +121,8 @@ class _ReelsScreenState extends State<ReelsScreen> {
     AuthGuard.run(context, onAuthenticated: () async {
       try {
         final userId = SupabaseService().currentUser!.id;
+        final reelIndex = _reels.indexWhere((r) => r['id'] == reelId);
+        final ownerId = reelIndex != -1 ? _reels[reelIndex]['user_id'] as String? : null;
         if (currentlyLiked) {
           await SupabaseService().client
               .from('reel_likes')
@@ -133,6 +135,25 @@ class _ReelsScreenState extends State<ReelsScreen> {
             'user_id': userId,
             'created_at': DateTime.now().toIso8601String(),
           });
+
+          // Notify the reel owner (skip self-likes)
+          if (ownerId != null && ownerId != userId) {
+            try {
+              final myProfile = await SupabaseService().getProfile(userId);
+              final myUsername = myProfile?['username'] as String?;
+              if (myUsername != null) {
+                await SupabaseService().createNotification(
+                  targetUserId: ownerId,
+                  type: 'reel_like',
+                  title: '@$myUsername',
+                  body: 'liked your reel',
+                  data: {'actor_id': userId, 'reel_id': reelId},
+                );
+              }
+            } catch (_) {
+              // Notification is best effort
+            }
+          }
         }
         setState(() {
           final index = _reels.indexWhere((r) => r['id'] == reelId);

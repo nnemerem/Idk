@@ -202,6 +202,28 @@ class SupabaseService {
       'following_id': targetUserId,
       'created_at': DateTime.now().toIso8601String(),
     });
+
+    // Notify the followed user (best effort — never breaks the action)
+    if (currentUserId != targetUserId) {
+      try {
+        final myProfile = await getProfile(currentUserId);
+        final myUsername = myProfile?['username'] as String?;
+        if (myUsername != null) {
+          await createNotification(
+            targetUserId: targetUserId,
+            type: 'follow',
+            title: '@$myUsername',
+            body: 'started following you',
+            data: {
+              'actor_id': currentUserId,
+              'target_username': myUsername,
+            },
+          );
+        }
+      } catch (e) {
+        // Notification failures are non-fatal
+      }
+    }
   }
 
   Future<void> unfollowUser(String targetUserId) async {
@@ -211,6 +233,29 @@ class SupabaseService {
         .delete()
         .eq('follower_id', currentUserId)
         .eq('following_id', targetUserId);
+  }
+
+  // Insert a notification (best effort, never throws)
+  Future<void> createNotification({
+    required String targetUserId,
+    required String type,
+    String? title,
+    String? body,
+    Map<String, dynamic>? data,
+  }) async {
+    try {
+      await client.from(RippleConstants.tableNotifications).insert({
+        'user_id': targetUserId,
+        'type': type,
+        'title': title,
+        'body': body,
+        'data': data,
+        'is_read': false,
+        'created_at': DateTime.now().toIso8601String(),
+      });
+    } catch (e) {
+      // Notification creation must not break the action
+    }
   }
 
   // Check if following

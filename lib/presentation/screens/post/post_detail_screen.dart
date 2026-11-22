@@ -27,6 +27,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
   List<Map<String, dynamic>> _comments = [];
   bool _isLoading = true;
   bool _isLoadingComments = false;
+  bool _isSaved = false;
   final TextEditingController _commentController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
 
@@ -63,11 +64,31 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
           _post = response;
           _isLoading = false;
         });
+        _loadSavedState();
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isLoading = false);
       }
+    }
+  }
+
+  Future<void> _loadSavedState() async {
+    final userId = SupabaseService().currentUser?.id;
+    if (userId == null) return;
+
+    try {
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableSavedPosts)
+          .select('post_id')
+          .eq('user_id', userId)
+          .eq('post_id', widget.postId);
+
+      if (mounted) {
+        setState(() => _isSaved = (response as List).isNotEmpty);
+      }
+    } catch (e) {
+      // Best effort
     }
   }
 
@@ -111,6 +132,26 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
           'created_at': DateTime.now().toIso8601String(),
         });
 
+        // Notify the post owner (skip self-comments)
+        final ownerId = _post?['user_id'] as String?;
+        if (ownerId != null && ownerId != currentUserId) {
+          try {
+            final myProfile = await SupabaseService().getProfile(currentUserId);
+            final myUsername = myProfile?['username'] as String?;
+            if (myUsername != null) {
+              await SupabaseService().createNotification(
+                targetUserId: ownerId,
+                type: 'post_comment',
+                title: '@$myUsername',
+                body: 'commented: "$content"',
+                data: {'actor_id': currentUserId, 'post_id': widget.postId},
+              );
+            }
+          } catch (_) {
+            // Notification is best effort
+          }
+        }
+
         _commentController.clear();
         _loadComments();
       } catch (e) {
@@ -132,23 +173,50 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     final isLiked = _getIsLiked();
     AuthGuard.run(context, onAuthenticated: () async {
       try {
+        final currentUserId = SupabaseService().currentUser!.id;
+        final ownerId = _post!['user_id'] as String?;
+
         if (isLiked) {
           await SupabaseService().client
               .from('post_likes')
               .delete()
               .eq('post_id', widget.postId)
-              .eq('user_id', SupabaseService().currentUser!.id);
+              .eq('user_id', currentUserId);
         } else {
           await SupabaseService().client.from('post_likes').insert({
             'post_id': widget.postId,
-            'user_id': SupabaseService().currentUser!.id,
+            'user_id': currentUserId,
             'created_at': DateTime.now().toIso8601String(),
           });
+
+          // Notify the post owner (skip self-likes)
+          if (ownerId != null && ownerId != currentUserId) {
+            try {
+              final myProfile = await SupabaseService().getProfile(currentUserId);
+              final myUsername = myProfile?['username'] as String?;
+              if (myUsername != null) {
+                await SupabaseService().createNotification(
+                  targetUserId: ownerId,
+                  type: 'post_like',
+                  title: '@$myUsername',
+                  body: 'liked your post',
+                  data: {'actor_id': currentUserId, 'post_id': widget.postId},
+                );
+              }
+            } catch (_) {
+              // Notification is best effort
+            }
+          }
         }
+
         setState(() {
           final likesCount = _post!['likes']?['count'] ?? 0;
           _post!['likes'] = {'count': isLiked ? likesCount - 1 : likesCount + 1};
-          _post!['is_liked'] = !isLiked;
+          _post!['is_liked'] = !isLiked
+              ? [
+                  {'user_id': currentUserId}
+                ]
+              : [];
         });
       } catch (e) {
         setState(() {}); // Revert
@@ -158,19 +226,42 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
 
   void _onSave() {
     AuthGuard.run(context, onAuthenticated: () async {
+      final userId = SupabaseService().currentUser?.id;
+      if (userId == null) return;
+
       try {
-        await SupabaseService().client.from(RippleConstants.tableSavedPosts).upsert({
-          'user_id': SupabaseService().currentUser!.id,
-          'post_id': widget.postId,
-          'created_at': DateTime.now().toIso8601String(),
-        });
+        if (_isSaved) {
+          await SupabaseService().client
+              .from(RippleConstants.tableSavedPosts)
+              .delete()
+              .eq('user_id', userId)
+              .eq('post_id', widget.postId);
+        } else {
+          await SupabaseService().client.from(RippleConstants.tableSavedPosts).upsert({
+            'user_id': userId,
+            'post_id': widget.postId,
+            'created_at': DateTime.now().toIso8601String(),
+          });
+        }
         if (mounted) {
+          setState(() => _isSaved = !_isSaved);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Post saved'), behavior: SnackBarBehavior.floating),
+            SnackBar(
+              content: Text(_isSaved ? 'Post saved' : 'Post unsaved'),
+              behavior: SnackBarBehavior.floating,
+            ),
           );
         }
       } catch (e) {
-        // Ignore
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to update saved post'),
+              backgroundColor: RippleColors.error,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
       }
     }, actionName: 'save');
   }
@@ -553,7 +644,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
           const Spacer(),
           IconButton(
             icon: SvgPicture.asset(
-              'assets/icons/bookmark.svg',
+              _isSaved ? 'assets/icons/bookmark_filled.svg' : 'assets/icons/bookmark.svg',
               width: 28,
               height: 28,
             ),
