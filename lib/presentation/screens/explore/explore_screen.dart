@@ -32,13 +32,6 @@ class _ExploreScreenState extends State<ExploreScreen>
     'For You',
     'Following',
     'Reels',
-    'Shop',
-    'Music',
-    'Travel',
-    'Food',
-    'Style',
-    'Art',
-    'Sports',
   ];
 
   @override
@@ -67,18 +60,62 @@ class _ExploreScreenState extends State<ExploreScreen>
     }
 
     try {
-      final response = await SupabaseService().client
-          .from(RippleConstants.tablePosts)
-          .select('''
-            *,
-            profiles:user_id (id, username, display_name, avatar_url),
-            likes:post_likes (count),
-            comments:post_comments (count)
-          ''')
-          .order('created_at', ascending: false)
-          .range(_page * _perPage, (_page + 1) * _perPage - 1);
+      List<Map<String, dynamic>> newPosts = [];
 
-      final newPosts = List<Map<String, dynamic>>.from(response);
+      if (_selectedCategory == 'Following') {
+        // Only show posts from people the user follows.
+        final currentUserId = SupabaseService().currentUser?.id;
+        if (currentUserId != null) {
+          final followsResponse = await SupabaseService().client
+              .from(RippleConstants.tableFollows)
+              .select('following_id')
+              .eq('follower_id', currentUserId);
+          final followedIds = (followsResponse as List)
+              .map((row) => row['following_id'] as String?)
+              .whereType<String>()
+              .toSet();
+
+          if (followedIds.isEmpty) {
+            if (mounted) {
+              setState(() {
+                _posts = [];
+                _isLoading = false;
+                _hasMore = false;
+              });
+            }
+            return;
+          }
+
+          final response = await SupabaseService().client
+              .from(RippleConstants.tablePosts)
+              .select('''
+                *,
+                profiles:user_id (id, username, display_name, avatar_url),
+                likes:post_likes (count),
+                comments:post_comments (count)
+              ''')
+              .order('created_at', ascending: false)
+              .range(_page * _perPage, (_page + 1) * _perPage - 1);
+
+          newPosts = List<Map<String, dynamic>>.from(response)
+              .where((p) => followedIds.contains(p['user_id']))
+              .toList();
+        }
+      } else {
+        final response = await SupabaseService().client
+            .from(RippleConstants.tablePosts)
+            .select('''
+              *,
+              profiles:user_id (id, username, display_name, avatar_url),
+              likes:post_likes (count),
+              comments:post_comments (count)
+            ''')
+            .order('created_at', ascending: false)
+            .range(_page * _perPage, (_page + 1) * _perPage - 1);
+
+        newPosts = List<Map<String, dynamic>>.from(response);
+      }
+
 
       if (mounted) {
         setState(() {
