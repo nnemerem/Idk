@@ -340,3 +340,27 @@ BEGIN
   UPDATE profiles SET posts_count = posts_count + 1 WHERE id = user_id;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ============================================
+-- STORY VIEWS + NOTIFICATIONS INSERT FIX
+-- ============================================
+-- Story views: one row per (viewer, story). Used to dim the ring on
+-- the feed after a story has been watched.
+CREATE TABLE story_views (
+  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+  story_id UUID REFERENCES stories(id) ON DELETE CASCADE,
+  viewed_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (user_id, story_id)
+);
+
+CREATE INDEX idx_story_views_user_id ON story_views(user_id);
+
+ALTER TABLE story_views ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users view own story views" ON story_views FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "Users insert own story views" ON story_views FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+-- Notifications: INSERT policy missing — the app inserts notifications from
+-- the client for other users (e.g. when someone likes your post). Without it
+-- RLS silently rejected every insert.
+CREATE POLICY "Authenticated users can create notifications" ON notifications FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);

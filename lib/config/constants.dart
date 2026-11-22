@@ -57,6 +57,7 @@ class RippleConstants {
   static const String tableConversationParticipants = 'conversation_participants';
   static const String tableSavedPosts = 'saved_posts';
   static const String tableNotifications = 'notifications';
+  static const String tableStoryViews = 'story_views';
 
   // Post types
   static const String postTypeImage = 'image';

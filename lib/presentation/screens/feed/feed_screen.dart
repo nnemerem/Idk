@@ -23,8 +23,9 @@ class FeedScreen extends StatefulWidget {
 class _FeedScreenState extends State<FeedScreen> {
   final ScrollController _scrollController = ScrollController();
   List<Map<String, dynamic>> _posts = [];
-  List<_StoryUser> _storyUsers = [];
-  _StoryUser? _ownStoryUser;
+  List<StoryUserGroup> _storyUsers = [];
+  StoryUserGroup? _ownStoryUser;
+  final Set<String> _viewedStoryIds = {};
   final Set<String> _savedPostIds = {};
   bool _isLoadingPosts = false;
   bool _isLoadingStories = true;
@@ -105,6 +106,8 @@ class _FeedScreenState extends State<FeedScreen> {
           .where((story) => followedIds.contains(story['user_id']))
           .toList();
 
+      await _loadStoryViews(currentUserId);
+
       if (mounted) {
         final storyUsers = _groupStoriesByUser(
           List<Map<String, dynamic>>.from(filtered),
@@ -124,7 +127,75 @@ class _FeedScreenState extends State<FeedScreen> {
   }
 
   /// Group stories by the person who owns them (one ring per user).
-  List<_StoryUser> _groupStoriesByUser(List<Map<String, dynamic>> stories) {
+  Future<void> _loadStoryViews(String userId) async {
+    try {
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableStoryViews)
+          .select('story_id')
+          .eq('user_id', userId);
+
+      final ids = (response as List)
+          .map((row) => row['story_id'] as String?)
+          .whereType<String>()
+          .toSet();
+      if (mounted) {
+        setState(() => _viewedStoryIds.addAll(ids));
+      }
+    } catch (_) {
+      // Best effort — viewed dimming is cosmetic
+    }
+  }
+
+  Future<void> _persistViewed(String storyId, String userId) async {
+    try {
+      await SupabaseService().client.from(RippleConstants.tableStoryViews).insert({
+        'user_id': userId,
+        'story_id': storyId,
+        'viewed_at': DateTime.now().toIso8601String(),
+      });
+    } catch (e) {
+      // Duplicate rows are expected for already-viewed stories; ignore.
+    }
+  }
+
+  void _onStoryShown(Map<String, dynamic> story, String ownerId) {
+    final currentUserId = SupabaseService().currentUser?.id;
+    if (currentUserId == null) return;
+    if (ownerId == currentUserId) return; // don't mark own stories as viewed
+    final storyId = story['id'] as String?;
+    if (storyId == null) return;
+    if (_viewedStoryIds.contains(storyId)) return;
+    setState(() => _viewedStoryIds.add(storyId));
+    _persistViewed(storyId, currentUserId);
+  }
+
+  void _hideStoryUser(String userId) {
+    setState(() {
+      _storyUsers = _storyUsers.where((u) => u.userId != userId).toList();
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchUserStories(String userId) async {
+    try {
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableStories)
+          .select('''
+            *,
+            profiles:user_id (id, username, display_name, avatar_url)
+          ''')
+          .eq('user_id', userId)
+          .gte('expires_at', DateTime.now().toIso8601String())
+          .order('created_at', ascending: true);
+      if (response is List && response.isNotEmpty) {
+        return List<Map<String, dynamic>>.from(response);
+      }
+    } catch (_) {
+      // Fall back to the feed-loaded stories
+    }
+    return [];
+  }
+
+  List<StoryUserGroup> _groupStoriesByUser(List<Map<String, dynamic>> stories) {
     final byUser = <String, List<Map<String, dynamic>>>{};
     for (final story in stories) {
       final userId = story['user_id'] as String?;
@@ -132,10 +203,10 @@ class _FeedScreenState extends State<FeedScreen> {
       byUser.putIfAbsent(userId, () => []).add(story);
     }
 
-    final users = <_StoryUser>[];
+    final users = <StoryUserGroup>[];
     byUser.forEach((userId, userStories) {
       final profile = userStories.first['profiles'] as Map<String, dynamic>?;
-      users.add(_StoryUser(
+      users.add(StoryUserGroup(
         userId: userId,
         profile: profile,
         stories: userStories,
@@ -364,35 +435,73 @@ class _FeedScreenState extends State<FeedScreen> {
     }, actionName: 'share');
   }
 
-  Future<void> _openStoryViewer(_StoryUser storyUser) async {
-    // Re-fetch fresh stories for this user so the viewer has current data
-    List<Map<String, dynamic>> stories = List<Map<String, dynamic>>.from(storyUser.stories);
-    try {
-      final response = await SupabaseService().client
-          .from(RippleConstants.tableStories)
-          .select('''
-            *,
-            profiles:user_id (id, username, display_name, avatar_url)
-          ''')
-          .eq('user_id', storyUser.userId)
-          .gte('expires_at', DateTime.now().toIso8601String())
-          .order('created_at', ascending: true);
-      if (response is List && response.isNotEmpty) {
-        stories = List<Map<String, dynamic>>.from(response);
-      }
-    } catch (e) {
-      // Fall back to the already-loaded stories
+  Future<void> _openStoryViewer(StoryUserGroup storyUser) async {
+    // Fresh stories for the tapped user so the viewer is current
+    var fresh = await _fetchUserStories(storyUser.userId);
+    if (fresh.isEmpty) {
+      fresh = List<Map<String, dynamic>>.from(storyUser.stories);
     }
 
-    if (stories.isEmpty || !mounted) return;
-    if (GuestMode.isGuestMode) {
-      // Guests can view stories (view-only)
+    // Build the browsing groups: own group first (Instagram parity), then the rest.
+    final groups = <StoryUserGroup>[];
+    if (_ownStoryUser != null) {
+      final ownStories = _ownStoryUser!.userId == storyUser.userId && fresh.isNotEmpty
+          ? fresh
+          : _ownStoryUser!.stories;
+      if (ownStories.isNotEmpty) {
+        groups.add(StoryUserGroup(
+          userId: _ownStoryUser!.userId,
+          profile: _ownStoryUser!.profile,
+          stories: ownStories,
+        ));
+      }
+    }
+    for (final u in _storyUsers) {
+      final stories = u.userId == storyUser.userId ? fresh : u.stories;
+      if (stories.isEmpty) continue;
+      groups.add(StoryUserGroup(userId: u.userId, profile: u.profile, stories: stories));
+    }
+
+    if (groups.isEmpty || !mounted) return;
+
+    // Sort stories chronologically (oldest first) within every group
+    final sortedGroups = <StoryUserGroup>[];
+    for (final g in groups) {
+      final sorted = List<Map<String, dynamic>>.from(g.stories)
+        ..sort((a, b) {
+          final ac = (a['created_at'] as String?) ?? '';
+          final bc = (b['created_at'] as String?) ?? '';
+          return ac.compareTo(bc);
+        });
+      sortedGroups.add(StoryUserGroup(
+        userId: g.userId,
+        profile: g.profile,
+        stories: sorted,
+      ));
+    }
+
+    // Resolve the flat starting index for the tapped user
+    int start = 0;
+    int targetStart = 0;
+    for (var i = 0; i < sortedGroups.length; i++) {
+      if (sortedGroups[i].userId == storyUser.userId) {
+        targetStart = start;
+        break;
+      }
+      start += sortedGroups[i].stories.length;
     }
 
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => StoryViewer(
-          stories: stories,
+          groups: sortedGroups,
+          initialIndex: targetStart,
+          currentUserId: SupabaseService().currentUser?.id,
+          onStoryShown: _onStoryShown,
+          onHideGroup: (userId) {
+            _hideStoryUser(userId);
+            Navigator.of(context).pop();
+          },
           onClose: () => Navigator.of(context).pop(),
         ),
       ),
@@ -555,6 +664,7 @@ class _FeedScreenState extends State<FeedScreen> {
                 avatarUrl: ownProfile?['avatar_url'],
                 hasStory: true,
                 isOwnStory: true,
+                isViewed: false,
                 onTap: () => _openStoryViewer(_ownStoryUser!),
               );
             }
@@ -562,12 +672,16 @@ class _FeedScreenState extends State<FeedScreen> {
           }
           final storyUser = _storyUsers[index - 1];
           final profile = storyUser.profile;
+          final isViewed = storyUser.stories.every(
+            (s) => _viewedStoryIds.contains(s['id'] as String?),
+          );
           return StoryRing(
             username: profile?['username'] ?? 'Unknown',
             displayName: profile?['display_name'] ?? 'Unknown',
             avatarUrl: profile?['avatar_url'],
             hasStory: true,
             isOwnStory: storyUser.userId == currentUserId,
+            isViewed: isViewed,
             onTap: () => _openStoryViewer(storyUser),
           );
         },
@@ -779,17 +893,5 @@ class _FeedScreenState extends State<FeedScreen> {
       ),
     );
   }
-}
-
-class _StoryUser {
-  final String userId;
-  final Map<String, dynamic>? profile;
-  final List<Map<String, dynamic>> stories;
-
-  const _StoryUser({
-    required this.userId,
-    required this.profile,
-    required this.stories,
-  });
 }
 

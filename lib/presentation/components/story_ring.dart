@@ -13,6 +13,7 @@ class StoryRing extends StatelessWidget {
   final bool hasStory;
   final bool isOwnStory;
   final bool isAddButton;
+  final bool isViewed;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
 
@@ -24,6 +25,7 @@ class StoryRing extends StatelessWidget {
     required this.hasStory,
     this.isOwnStory = false,
     this.isAddButton = false,
+    this.isViewed = false,
     this.onTap,
     this.onLongPress,
   });
@@ -50,11 +52,14 @@ class StoryRing extends StatelessWidget {
                     height: RippleConstants.storyRingSize,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      gradient: LinearGradient(
-                        colors: RippleColors.storyRingGradient,
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
+                      gradient: isViewed
+                          ? null
+                          : LinearGradient(
+                              colors: RippleColors.storyRingGradient,
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                      color: isViewed ? RippleColors.border : null,
                     ),
                     child: Container(
                       margin: EdgeInsets.all(RippleConstants.storyRingStrokeWidth),
@@ -138,16 +143,41 @@ class StoryRing extends StatelessWidget {
   }
 }
 
-class StoryViewer extends StatefulWidget {
+/// One user's stories as a single browsing group (Instagram parity).
+class StoryUserGroup {
+  final String userId;
+  final Map<String, dynamic>? profile;
   final List<Map<String, dynamic>> stories;
+
+  const StoryUserGroup({
+    required this.userId,
+    required this.profile,
+    required this.stories,
+  });
+}
+
+/// Fullscreen story viewer.
+///
+/// Browses every group (every user's story) as a flat PageView:
+/// left tap = previous story, right tap = next story, swipe = next/prev,
+/// long-press = pause. Progress bars reflect the stories in the current
+/// group; video stories auto-advance at their real duration.
+class StoryViewer extends StatefulWidget {
+  final List<StoryUserGroup> groups;
   final int initialIndex;
+  final String? currentUserId;
   final VoidCallback? onClose;
+  final void Function(Map<String, dynamic> story, String ownerId)? onStoryShown;
+  final void Function(String userId)? onHideGroup;
 
   const StoryViewer({
     super.key,
-    required this.stories,
+    required this.groups,
     this.initialIndex = 0,
+    this.currentUserId,
     this.onClose,
+    this.onStoryShown,
+    this.onHideGroup,
   });
 
   @override
@@ -158,35 +188,109 @@ class _StoryViewerState extends State<StoryViewer>
     with SingleTickerProviderStateMixin {
   late PageController _pageController;
   late AnimationController _progressController;
-  int _currentIndex = 0;
+  int _flatIndex = 0;
   bool _isPaused = false;
-  static const Duration _storyDuration = Duration(seconds: 5);
+  static const Duration _imageDuration = Duration(seconds: 5);
+  static const Duration _videoFallback = Duration(seconds: 5);
+  final Map<int, Duration> _videoDurations = {};
+  final Map<int, bool> _viewedPages = {};
+
+  late final List<Map<String, dynamic>> _flat;
+  late final List<int> _groupStart;
+  late final List<int> _groupEnd;
+  late final List<String> _groupUserId;
 
   @override
   void initState() {
     super.initState();
-    _currentIndex = widget.initialIndex;
-    _pageController = PageController(initialPage: widget.initialIndex);
-    _progressController = AnimationController(
-      vsync: this,
-      duration: _storyDuration,
-    );
-    _startProgress();
-  }
-
-  void _startProgress() {
-    // Resume from the current progress position rather than restarting,
-    // so pausing mid-story keeps the same position on resume.
-    _progressController.forward(from: _progressController.value).then((_) {
-      if (!_isPaused && mounted) {
-        _nextStory();
-      }
+    _flat = [for (final g in widget.groups) ...g.stories];
+    _groupStart = [];
+    _groupEnd = [];
+    _groupUserId = [];
+    int cursor = 0;
+    for (final g in widget.groups) {
+      _groupStart.add(cursor);
+      _groupEnd.add(cursor + g.stories.length - 1);
+      _groupUserId.add(g.userId);
+      cursor += g.stories.length;
+    }
+    _flatIndex = widget.initialIndex.clamp(0, _flat.length - 1);
+    _pageController = PageController(initialPage: _flatIndex);
+    _createProgressController();
+    _markViewed(_flatIndex);
+    _progressController.forward().then((_) {
+      if (!_isPaused && mounted) _nextPage();
     });
   }
 
-  void _nextStory() {
-    if (_currentIndex < widget.stories.length - 1) {
-      _currentIndex++;
+  int get _totalPages => _flat.length;
+
+  int _groupOf(int flatIndex) {
+    for (int i = 0; i < _groupStart.length; i++) {
+      if (flatIndex >= _groupStart[i] && flatIndex <= _groupEnd[i]) return i;
+    }
+    return 0;
+  }
+
+  int _storyIndexInGroup(int flatIndex) => flatIndex - _groupStart[_groupOf(flatIndex)];
+
+  int _storiesInCurrentGroup(int flatIndex) =>
+      _groupEnd[_groupOf(flatIndex)] - _groupStart[_groupOf(flatIndex)] + 1;
+
+  Duration _durationFor(int flatIndex) {
+    final story = _flat[flatIndex];
+    final mediaType = story['media_type'] as String? ?? 'image';
+    if (mediaType == 'video') {
+      final d = _videoDurations[flatIndex];
+      return d != null && d.inMilliseconds > 0 ? d : _videoFallback;
+    }
+    return _imageDuration;
+  }
+
+  void _createProgressController() {
+    _progressController = AnimationController(
+      vsync: this,
+      duration: _durationFor(_flatIndex),
+    );
+  }
+
+  void _markViewed(int flatIndex) {
+    if (flatIndex < 0 || flatIndex >= _totalPages) return;
+    if (_viewedPages[flatIndex] == true) return;
+    _viewedPages[flatIndex] = true;
+    final story = _flat[flatIndex];
+    widget.onStoryShown?.call(story, _groupUserId[_groupOf(flatIndex)]);
+  }
+
+  void _restartProgress() {
+    final story = _flat[_flatIndex];
+    final mediaType = story['media_type'] as String? ?? 'image';
+    final duration = mediaType == 'video'
+        ? (_videoDurations[_flatIndex] ?? _videoFallback)
+        : _imageDuration;
+    _progressController.dispose();
+    _progressController = AnimationController(vsync: this, duration: duration);
+    final started = _flatIndex;
+    _progressController.forward().then((_) {
+      if (!_isPaused && mounted && _flatIndex == started) _nextPage();
+    });
+  }
+
+  void _onPageChanged(int page) {
+    setState(() => _flatIndex = page);
+    _markViewed(page);
+    _restartProgress();
+  }
+
+  void _resumeProgress() {
+    final started = _flatIndex;
+    _progressController.forward(from: _progressController.value).then((_) {
+      if (!_isPaused && mounted && _flatIndex == started) _nextPage();
+    });
+  }
+
+  void _nextPage() {
+    if (_flatIndex < _totalPages - 1) {
       _pageController.nextPage(
         duration: RippleConstants.animationNormal,
         curve: Curves.easeInOut,
@@ -196,14 +300,26 @@ class _StoryViewerState extends State<StoryViewer>
     }
   }
 
-  void _previousStory() {
-    if (_currentIndex > 0) {
-      _currentIndex--;
+  void _previousPage() {
+    if (_flatIndex > 0) {
       _pageController.previousPage(
         duration: RippleConstants.animationNormal,
         curve: Curves.easeInOut,
       );
     }
+  }
+
+  void _onVideoReady(int flatIndex, Duration duration) {
+    if (!mounted || flatIndex != _flatIndex) return;
+    setState(() {
+      _videoDurations[flatIndex] = duration;
+    });
+    if (!_isPaused && mounted) _restartProgress();
+  }
+
+  void _onVideoEnded(int flatIndex) {
+    if (flatIndex != _flatIndex) return;
+    _nextPage();
   }
 
   @override
@@ -215,6 +331,13 @@ class _StoryViewerState extends State<StoryViewer>
 
   @override
   Widget build(BuildContext context) {
+    final group = _groupOf(_flatIndex);
+    final groupStories = widget.groups[group].stories;
+    final storyIdxInGroup = _storyIndexInGroup(_flatIndex);
+    final currentStory = _flat[_flatIndex];
+    final ownUserId = widget.currentUserId;
+    final storyOwnerId = currentStory['user_id'] as String?;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: GestureDetector(
@@ -225,34 +348,59 @@ class _StoryViewerState extends State<StoryViewer>
         },
         onLongPressEnd: (_) => setState(() {
           _isPaused = false;
-          _startProgress();
+          _resumeProgress();
         }),
         child: Stack(
           children: [
-            // Story content
             PageView.builder(
               controller: _pageController,
-              itemCount: widget.stories.length,
-              onPageChanged: (index) {
-                _currentIndex = index;
-                _progressController.reset();
-                _startProgress();
-              },
+              itemCount: _totalPages,
+              onPageChanged: _onPageChanged,
               itemBuilder: (context, index) {
-                final story = widget.stories[index];
+                final story = _flat[index];
                 final mediaUrl = story['media_url'] as String?;
                 final mediaType = story['media_type'] as String? ?? 'image';
-                final profile = story['profiles'] as Map<String, dynamic>?;
 
-                return _StoryContent(
-                  mediaUrl: mediaUrl,
-                  mediaType: mediaType,
-                  username: profile?['username'] ?? 'Unknown',
-                  displayName: profile?['display_name'] ?? 'Unknown',
-                  avatarUrl: profile?['avatar_url'],
-                  caption: story['caption'] as String?,
-                  timestamp: story['created_at'] as String?,
-                  isPaused: _isPaused,
+                if (mediaType == 'video' && mediaUrl != null) {
+                  return _VideoStoryPlayer(
+                    videoUrl: mediaUrl,
+                    isPaused: _isPaused,
+                    onReady: (d) => _onVideoReady(index, d),
+                    onEnded: () => _onVideoEnded(index),
+                  );
+                }
+                return Center(
+                  child: mediaUrl != null
+                      ? CachedNetworkImage(
+                          imageUrl: mediaUrl,
+                          fit: BoxFit.contain,
+                          placeholder: (context, url) => Center(
+                            child: CircularProgressIndicator(
+                              color: RippleColors.primary,
+                              strokeWidth: 2,
+                            ),
+                          ),
+                          errorWidget: (context, url, error) => Container(
+                            color: RippleColors.surfaceVariant,
+                            child: SvgPicture.asset(
+                              'assets/icons/photo_library.svg',
+                              width: 64,
+                              height: 64,
+                              colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
+                            ),
+                          ),
+                        )
+                      : Container(
+                          color: RippleColors.surfaceVariant,
+                          child: Center(
+                            child: SvgPicture.asset(
+                              'assets/icons/photo_library.svg',
+                              width: 64,
+                              height: 64,
+                              colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
+                            ),
+                          ),
+                        ),
                 );
               },
             ),
@@ -279,24 +427,24 @@ class _StoryViewerState extends State<StoryViewer>
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     child: Row(
                       children: [
-                        // Progress bars
+                        // Progress bars (current group only)
                         Expanded(
                           child: Row(
-                            children: List.generate(
-                              widget.stories.length,
-                              (index) => Expanded(
-                                child: Padding(
-                                  padding: EdgeInsets.only(
-                                    right: index < widget.stories.length - 1 ? 4 : 0,
-                                  ),
-                                  child: _ProgressBar(
-                                    index: index,
-                                    currentIndex: _currentIndex,
-                                    controller: _progressController,
+                            children: [
+                              for (int i = 0; i < groupStories.length; i++)
+                                Expanded(
+                                  child: Padding(
+                                    padding: EdgeInsets.only(
+                                      right: i < groupStories.length - 1 ? 4 : 0,
+                                    ),
+                                    child: _ProgressBar(
+                                      index: i,
+                                      currentIndex: storyIdxInGroup,
+                                      controller: _progressController,
+                                    ),
                                   ),
                                 ),
-                              ),
-                            ),
+                            ],
                           ),
                         ),
                         // Close button
@@ -320,7 +468,7 @@ class _StoryViewerState extends State<StoryViewer>
               top: 100,
               left: 16,
               right: 16,
-              child: _buildStoryHeader(widget.stories[_currentIndex]),
+              child: _buildStoryHeader(currentStory, ownUserId, storyOwnerId),
             ),
           ],
         ),
@@ -333,17 +481,20 @@ class _StoryViewerState extends State<StoryViewer>
     final tapX = details.globalPosition.dx;
 
     if (tapX < screenWidth / 3) {
-      // Left third - previous story
-      _previousStory();
+      _previousPage();
     } else if (tapX > screenWidth * 2 / 3) {
-      // Right third - next story
-      _nextStory();
+      _nextPage();
     }
   }
 
-  Widget _buildStoryHeader(Map<String, dynamic> story) {
+  Widget _buildStoryHeader(
+    Map<String, dynamic> story,
+    String? currentUserId,
+    String? storyOwnerId,
+  ) {
     final profile = story['profiles'] as Map<String, dynamic>?;
     final timestamp = story['created_at'] as String?;
+    final isOwnStory = currentUserId != null && storyOwnerId == currentUserId;
 
     return Row(
       children: [
@@ -351,7 +502,7 @@ class _StoryViewerState extends State<StoryViewer>
           radius: 16,
           backgroundColor: RippleColors.surfaceVariant,
           backgroundImage: profile?['avatar_url'] != null
-              ? CachedNetworkImageProvider(profile!['avatar_url'])
+              ? CachedNetworkImageProvider(profile!['avatar_url'] as String)
               : null,
           child: profile?['avatar_url'] == null
               ? SvgPicture.asset(
@@ -386,60 +537,57 @@ class _StoryViewerState extends State<StoryViewer>
             ],
           ),
         ),
-        // Story actions
-        Row(
-          children: [
-            IconButton(
-              icon: SvgPicture.asset(
-                'assets/icons/more_vert.svg',
-                width: 22,
-                height: 22,
-              ),
-              onPressed: () {
-                showModalBottomSheet(
-                  context: context,
-                  backgroundColor: Colors.transparent,
-                  builder: (context) => Container(
-                    decoration: BoxDecoration(
-                      color: RippleColors.surface,
-                      borderRadius: const BorderRadius.vertical(
-                        top: Radius.circular(RippleConstants.borderRadiusXLarge),
-                      ),
-                    ),
-                    child: SafeArea(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          ListTile(
-                            leading: SvgPicture.asset('assets/icons/flag.svg', width: 24, height: 24),
-                            title: const Text('Report story'),
-                            onTap: () {
-                              Navigator.of(context).pop();
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('Thanks — our team reviews reports'),
-                                  behavior: SnackBarBehavior.floating,
-                                ),
-                              );
-                            },
-                          ),
-                          ListTile(
-                            leading: SvgPicture.asset('assets/icons/visibility_off.svg', width: 24, height: 24),
-                            title: const Text('Hide story'),
-                            onTap: () {
-                              Navigator.of(context).pop();
-                              widget.onClose();
-                            },
-                          ),
-                        ],
-                      ),
+        if (!isOwnStory && widget.onHideGroup != null) // Show actions only for others' stories
+          IconButton(
+            icon: SvgPicture.asset(
+              'assets/icons/more_vert.svg',
+              width: 22,
+              height: 22,
+            ),
+            onPressed: () {
+              showModalBottomSheet(
+                context: context,
+                backgroundColor: Colors.transparent,
+                builder: (context) => Container(
+                  decoration: BoxDecoration(
+                    color: RippleColors.surface,
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(RippleConstants.borderRadiusXLarge),
                     ),
                   ),
-                );
-              },
-            ),
-          ],
-        ),
+                  child: SafeArea(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ListTile(
+                          leading: SvgPicture.asset('assets/icons/flag.svg', width: 24, height: 24),
+                          title: const Text('Report story'),
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Thanks — our team reviews reports'),
+                                behavior: SnackBarBehavior.floating,
+                              ),
+                            );
+                          },
+                        ),
+                        ListTile(
+                          leading: SvgPicture.asset('assets/icons/visibility_off.svg', width: 24, height: 24),
+                          title: const Text('Hide story'),
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            final viewerUserId = widget.groups[_groupOf(_flatIndex)].userId;
+                            widget.onHideGroup?.call(viewerUserId);
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
       ],
     );
   }
@@ -498,72 +646,18 @@ class _ProgressBar extends StatelessWidget {
   }
 }
 
-class _StoryContent extends StatelessWidget {
-  final String? mediaUrl;
-  final String mediaType;
-  final String username;
-  final String displayName;
-  final String? avatarUrl;
-  final String? caption;
-  final String? timestamp;
-  final bool isPaused;
-
-  const _StoryContent({
-    this.mediaUrl,
-    required this.mediaType,
-    required this.username,
-    required this.displayName,
-    this.avatarUrl,
-    this.caption,
-    this.timestamp,
-    this.isPaused = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: mediaType == 'video' && mediaUrl != null
-          ? _VideoStoryPlayer(videoUrl: mediaUrl!, isPaused: isPaused)
-          : mediaUrl != null
-              ? CachedNetworkImage(
-                  imageUrl: mediaUrl,
-                  fit: BoxFit.contain,
-                  placeholder: (context, url) => Center(
-                    child: CircularProgressIndicator(
-                      color: RippleColors.primary,
-                      strokeWidth: 2,
-                    ),
-                  ),
-                  errorWidget: (context, url, error) => Container(
-                    color: RippleColors.surfaceVariant,
-                    child: SvgPicture.asset(
-                      'assets/icons/photo_library.svg',
-                      width: 64,
-                      height: 64,
-                      colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
-                    ),
-                  ),
-                )
-              : Container(
-                  color: RippleColors.surfaceVariant,
-                  child: Center(
-                    child: SvgPicture.asset(
-                      'assets/icons/photo_library.svg',
-                      width: 64,
-                      height: 64,
-                      colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
-                    ),
-                  ),
-                ),
-    );
-  }
-}
-
 class _VideoStoryPlayer extends StatefulWidget {
   final String videoUrl;
   final bool isPaused;
+  final void Function(Duration duration)? onReady;
+  final VoidCallback? onEnded;
 
-  const _VideoStoryPlayer({required this.videoUrl, this.isPaused = false});
+  const _VideoStoryPlayer({
+    required this.videoUrl,
+    this.isPaused = false,
+    this.onReady,
+    this.onEnded,
+  });
 
   @override
   State<_VideoStoryPlayer> createState() => _VideoStoryPlayerState();
@@ -572,6 +666,7 @@ class _VideoStoryPlayer extends StatefulWidget {
 class _VideoStoryPlayerState extends State<_VideoStoryPlayer> {
   late final VideoPlayerController _controller;
   bool _isInitialized = false;
+  bool _sentEnd = false;
 
   @override
   void initState() {
@@ -584,10 +679,23 @@ class _VideoStoryPlayerState extends State<_VideoStoryPlayer> {
             if (!widget.isPaused) {
               _controller.play();
             }
-            _controller.setLooping(true);
           });
+          final duration = _controller.value.duration;
+          widget.onReady?.call(duration);
         }
       });
+    _controller.addListener(_onVideoTick);
+  }
+
+  void _onVideoTick() {
+    if (_sentEnd) return;
+    if (!_isInitialized) return;
+    final value = _controller.value;
+    if (value.duration.inMilliseconds > 0 && value.position >= value.duration) {
+      _sentEnd = true;
+      _controller.pause();
+      widget.onEnded?.call();
+    }
   }
 
   @override
@@ -597,13 +705,14 @@ class _VideoStoryPlayerState extends State<_VideoStoryPlayer> {
       if (widget.isPaused) {
         _controller.pause();
       } else {
-        _controller.play();
+        if (_isInitialized) _controller.play();
       }
     }
   }
 
   @override
   void dispose() {
+    _controller.removeListener(_onVideoTick);
     _controller.dispose();
     super.dispose();
   }
