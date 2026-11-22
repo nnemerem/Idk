@@ -121,8 +121,7 @@ class _ExploreScreenState extends State<ExploreScreen>
               child: const Text(
                 RippleConstants.appName,
                 style: TextStyle(
-                  fontFamily: 'Billabong',
-                  fontSize: 28,
+                                    fontSize: 28,
                   fontWeight: FontWeight.w400,
                   color: Colors.white,
                   letterSpacing: 0.5,

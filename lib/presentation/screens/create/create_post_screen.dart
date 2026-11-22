@@ -261,24 +261,6 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
                   _buildHashtagSuggestions(),
 
                   const SizedBox(height: 16),
-
-                  // Tag people
-                  _buildActionRow(
-                    iconAsset: 'assets/icons/person_add.svg',
-                    label: 'Tag People',
-                    onTap: () {
-                      // TODO: Tag people
-                    },
-                  ),
-
-                  // Add music
-                  _buildActionRow(
-                    iconAsset: 'assets/icons/music.svg',
-                    label: 'Add Music',
-                    onTap: () {
-                      // TODO: Add music
-                    },
-                  ),
                 ],
               ),
             ),

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:ripple/presentation/components/likes_list_sheet.dart';
+import 'package:ripple/presentation/components/share_sheet.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -256,9 +258,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
               height: 24,
               colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
             ),
-            onPressed: () {
-              // TODO: Post options
-            },
+            onPressed: () => _showPostOptions(),
           ),
         ],
       ),
@@ -568,12 +568,77 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     );
   }
 
+  void _showPostOptions() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        constraints: const BoxConstraints(maxHeight: 400),
+        decoration: BoxDecoration(
+          color: RippleColors.surface,
+          borderRadius: const BorderRadius.vertical(
+            top: Radius.circular(RippleConstants.borderRadiusXLarge),
+          ),
+        ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: SvgPicture.asset('assets/icons/link.svg', width: 24, height: 24),
+                title: const Text('Copy link'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _shareOrCopy();
+                },
+              ),
+              ListTile(
+                leading: SvgPicture.asset('assets/icons/flag.svg', width: 24, height: 24),
+                title: const Text('Report'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Thanks — our team reviews reports'),
+                      behavior: SnackBarBehavior.floating,
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _shareOrCopy() async {
+    final caption = _post?['caption'] as String?;
+    final author = _post?['profiles'] is Map
+        ? (_post?['profiles'] as Map)['username']
+        : null;
+    final text = author != null
+        ? 'Check out this post by @$author on Ripple!'
+        : 'Check out this post on Ripple!';
+    await ShareSheet.show(
+      context,
+      link: 'ripple://post/${_post?['id'] ?? ''}',
+      caption: caption,
+      shareText: text,
+    );
+  }
+
   Widget _buildLikesCount(int count) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: GestureDetector(
         onTap: () {
-          // TODO: Show likes list
+          LikesListSheet.show(
+            context,
+            table: 'post_likes',
+            idColumn: 'post_id',
+            id: _post!['id'] as String,
+          );
         },
         child: Text(
           '${_formatCount(count)} likes',

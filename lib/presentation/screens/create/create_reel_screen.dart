@@ -150,9 +150,9 @@ class _CreateReelScreenState extends State<CreateReelScreen>
         contentType: 'video/mp4',
       );
 
-      // Generate thumbnail (first frame)
-      String? thumbnailUrl;
-      // TODO: Generate and upload thumbnail
+      // Thumbnail generation is not available offline; the UI falls back
+      // to the video URL.
+      String? thumbnailUrl = null;
 
       // Create reel
       await SupabaseService().client.from(RippleConstants.tableReels).insert({

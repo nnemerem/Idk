@@ -162,21 +162,6 @@ class _DmsListScreenState extends State<DmsListScreen> {
                   )
                 : null,
           ),
-          // Online indicator (placeholder)
-          if (false) // TODO: Add online status
-            Positioned(
-              bottom: 0,
-              right: 0,
-              child: Container(
-                width: 12,
-                height: 12,
-                decoration: BoxDecoration(
-                  color: RippleColors.onlineGreen,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: RippleColors.background, width: 2),
-                ),
-              ),
-            ),
         ],
       ),
       title: Text(

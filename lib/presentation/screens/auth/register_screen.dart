@@ -101,8 +101,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       child: Text(
                         RippleConstants.appName,
                         style: const TextStyle(
-                          fontFamily: 'Billabong',
-                          fontSize: 52,
+                                                    fontSize: 52,
                           fontWeight: FontWeight.w400,
                           color: Colors.white,
                           letterSpacing: 1,

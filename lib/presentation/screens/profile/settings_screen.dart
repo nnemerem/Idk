@@ -55,130 +55,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                // Account section
+                // Account & profile
                 _buildSectionHeader('Account'),
                 _SettingsTile(
                   iconAsset: 'assets/icons/person_outline.svg',
                   title: 'Edit Profile',
-                  subtitle: 'Change name, username, bio, photo',
+                  subtitle: _profile?['display_name'] != null
+                      ? '@${_profile?['username']}'
+                      : 'Change name, username, bio, photo',
                   onTap: () => context.go(RippleConstants.routeEditProfile),
                 ),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/lock.svg',
-                  title: 'Password & Security',
-                  subtitle: 'Change password, two-factor authentication',
-                  onTap: () {
-                    // TODO: Navigate to security settings
-                  },
-                ),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/email.svg',
-                  title: 'Email',
-                  subtitle: _profile?['email'] ?? 'Not set',
-                  onTap: () {
-                    // TODO: Change email
-                  },
-                ),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/phone.svg',
-                  title: 'Phone Number',
-                  subtitle: _profile?['phone_number'] ?? 'Not set',
-                  onTap: () {
-                    // TODO: Change phone
-                  },
-                ),
-
                 const SizedBox(height: 24),
-                // Preferences section
-                _buildSectionHeader('Preferences'),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/notification.svg',
-                  title: 'Notifications',
-                  subtitle: 'Manage push and email notifications',
-                  onTap: () {
-                    // TODO: Notification settings
-                  },
-                ),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/dark_mode.svg',
-                  title: 'Theme',
-                  subtitle: 'Dark (system default)',
-                  onTap: () {
-                    // TODO: Theme settings
-                  },
-                ),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/language.svg',
-                  title: 'Language',
-                  subtitle: 'English (Default)',
-                  onTap: () {
-                    // TODO: Language settings
-                  },
-                ),
-
-                const SizedBox(height: 24),
-                // Privacy section
-                _buildSectionHeader('Privacy & Safety'),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/visibility.svg',
-                  title: 'Account Privacy',
-                  subtitle: 'Public / Private account',
-                  onTap: () {
-                    // TODO: Privacy settings
-                  },
-                ),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/block.svg',
-                  title: 'Blocked Accounts',
-                  subtitle: 'Manage blocked accounts',
-                  onTap: () {
-                    // TODO: Blocked accounts
-                  },
-                ),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/mute.svg',
-                  title: 'Muted Accounts',
-                  subtitle: 'Manage muted accounts',
-                  onTap: () {
-                    // TODO: Muted accounts
-                  },
-                ),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/history.svg',
-                  title: 'Activity Log',
-                  subtitle: 'View your activity',
-                  onTap: () {
-                    // TODO: Activity log
-                  },
-                ),
-
-                const SizedBox(height: 24),
-                // More section
-                _buildSectionHeader('More'),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/help.svg',
-                  title: 'Help Center',
-                  subtitle: 'Get help and support',
-                  onTap: () {
-                    // TODO: Help center
-                  },
-                ),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/article.svg',
-                  title: 'Terms of Service',
-                  subtitle: 'Read our terms',
-                  onTap: () {
-                    // TODO: Terms
-                  },
-                ),
-                _SettingsTile(
-                  iconAsset: 'assets/icons/privacy.svg',
-                  title: 'Privacy Policy',
-                  subtitle: 'Read our privacy policy',
-                  onTap: () {
-                    // TODO: Privacy policy
-                  },
-                ),
+                // App
+                _buildSectionHeader('App'),
                 _SettingsTile(
                   iconAsset: 'assets/icons/info.svg',
                   title: 'About',
@@ -262,8 +151,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           child: Text(
             RippleConstants.appName,
             style: const TextStyle(
-              fontFamily: 'Billabong',
-              fontSize: 36,
+                            fontSize: 36,
               fontWeight: FontWeight.w400,
               color: Colors.white,
             ),

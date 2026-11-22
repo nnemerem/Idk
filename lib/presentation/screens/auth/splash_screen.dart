@@ -103,8 +103,7 @@ class _SplashScreenState extends State<SplashScreen>
                       child: Text(
                         RippleConstants.appName,
                         style: const TextStyle(
-                          fontFamily: 'Billabong',
-                          fontSize: 42,
+                                                    fontSize: 42,
                           fontWeight: FontWeight.w400,
                           color: Colors.white,
                           letterSpacing: 1,

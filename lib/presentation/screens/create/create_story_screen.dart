@@ -182,8 +182,11 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
 
         if (!isVideo) {
           thumbnailUrl = mediaUrl;
+        } else {
+          // Video stories: no thumbnail is generated yet; the UI falls back
+          // to the video URL.
+          thumbnailUrl = null;
         }
-        // TODO: Generate thumbnail for video
       }
 
       // Create story
@@ -451,27 +454,6 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
                 iconAsset: 'assets/icons/text.svg',
                 label: 'Text',
                 onTap: _addText,
-              ),
-              _ToolbarButton(
-                iconAsset: 'assets/icons/draw.svg',
-                label: 'Draw',
-                onTap: () {
-                  // TODO: Drawing tool
-                },
-              ),
-              _ToolbarButton(
-                iconAsset: 'assets/icons/sticker.svg',
-                label: 'Stickers',
-                onTap: () {
-                  // TODO: Stickers
-                },
-              ),
-              _ToolbarButton(
-                iconAsset: 'assets/icons/music.svg',
-                label: 'Music',
-                onTap: () {
-                  // TODO: Music
-                },
               ),
             ],
           ),

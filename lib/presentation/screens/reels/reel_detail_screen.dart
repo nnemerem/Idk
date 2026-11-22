@@ -755,7 +755,17 @@ class _MusicButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: () {
-        // TODO: Navigate to music page
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            backgroundColor: RippleColors.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
+            ),
+            title: const Text('Music'),
+            content: Text('$musicTitle${musicArtist != null ? ' — $musicArtist' : ''}'),
+          ),
+        );
       },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),

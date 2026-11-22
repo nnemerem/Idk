@@ -8,7 +8,7 @@ import 'package:ripple/config/constants.dart';
 import 'package:ripple/services/supabase_service.dart';
 import 'package:ripple/services/conversation_service.dart';
 import 'package:ripple/core/utils/auth_guard.dart';
-import 'package:ripple/core/utils/guest_mode.dart';
+import 'package:ripple/presentation/components/followers_list_sheet.dart';
 
 class UserProfileScreen extends StatefulWidget {
   final String username;
@@ -327,14 +327,20 @@ class _UserProfileScreenState extends State<UserProfileScreen>
             count: _followersCount,
             label: 'Followers',
             onTap: () {
-              // TODO: Show followers list
+              final id = _profile?['id'] as String?;
+              if (id != null) {
+                FollowersListSheet.show(context, profileId: id, isFollowers: true);
+              }
             },
           ),
           _StatItem(
             count: _followingCount,
             label: 'Following',
             onTap: () {
-              // TODO: Show following list
+              final id = _profile?['id'] as String?;
+              if (id != null) {
+                FollowersListSheet.show(context, profileId: id, isFollowers: false);
+              }
             },
           ),
         ],

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:ripple/presentation/components/likes_list_sheet.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:video_player/video_player.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -122,9 +124,8 @@ class PostCard extends StatelessWidget {
           // Avatar
           GestureDetector(
             onTap: () {
-              if (profile?['username'] != null) {
-                // TODO: Navigate to user profile
-              }
+              final username = profile?['username'] as String?;
+              if (username != null) context.go('/user/$username');
             },
             child: CircleAvatar(
               radius: RippleConstants.avatarSizeMedium / 2,
@@ -149,9 +150,8 @@ class PostCard extends StatelessWidget {
           Expanded(
             child: GestureDetector(
               onTap: () {
-                if (profile?['username'] != null) {
-                  // TODO: Navigate to user profile
-                }
+                final username = profile?['username'] as String?;
+                if (username != null) context.go('/user/$username');
               },
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -189,9 +189,28 @@ class PostCard extends StatelessWidget {
               borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
             ),
             onSelected: (value) {
-              // TODO: Handle menu actions
+              if (value == 'copy_link') {
+                onShare(post['id'] as String);
+              } else if (value == 'report') {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Thanks — our team reviews reports'),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
             },
             itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'copy_link',
+                child: Row(
+                  children: [
+                    SvgPicture.asset('assets/icons/link.svg', width: 18, height: 18),
+                    const SizedBox(width: 12),
+                    const Text('Copy link'),
+                  ],
+                ),
+              ),
               PopupMenuItem(
                 value: 'report',
                 child: Row(
@@ -199,26 +218,6 @@ class PostCard extends StatelessWidget {
                     SvgPicture.asset('assets/icons/flag.svg', width: 18, height: 18),
                     const SizedBox(width: 12),
                     const Text('Report'),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'hide',
-                child: Row(
-                  children: [
-                    SvgPicture.asset('assets/icons/visibility_off.svg', width: 18, height: 18),
-                    const SizedBox(width: 12),
-                    const Text('Hide'),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'unfollow',
-                child: Row(
-                  children: [
-                    SvgPicture.asset('assets/icons/block.svg', width: 18, height: 18),
-                    const SizedBox(width: 12),
-                    const Text('Unfollow'),
                   ],
                 ),
               ),
@@ -413,7 +412,12 @@ class PostCard extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: GestureDetector(
         onTap: () {
-          // TODO: Show likes list
+          LikesListSheet.show(
+            context,
+            table: 'post_likes',
+            idColumn: 'post_id',
+            id: post['id'] as String,
+          );
         },
         child: Text(
           '${_formatCount(count)} likes',

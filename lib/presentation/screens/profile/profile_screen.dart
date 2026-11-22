@@ -10,6 +10,7 @@ import 'package:ripple/services/supabase_service.dart';
 import 'package:ripple/core/utils/guest_mode.dart';
 import 'package:ripple/presentation/screens/profile/edit_profile_screen.dart';
 import 'package:ripple/presentation/screens/profile/settings_screen.dart';
+import 'package:ripple/presentation/components/followers_list_sheet.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -299,14 +300,20 @@ class _ProfileScreenState extends State<ProfileScreen>
             count: _followersCount,
             label: 'Followers',
             onTap: () {
-              // TODO: Show followers list
+              final id = SupabaseService().currentUser?.id;
+              if (id != null) {
+                FollowersListSheet.show(context, profileId: id, isFollowers: true);
+              }
             },
           ),
           _StatItem(
             count: _followingCount,
             label: 'Following',
             onTap: () {
-              // TODO: Show following list
+              final id = SupabaseService().currentUser?.id;
+              if (id != null) {
+                FollowersListSheet.show(context, profileId: id, isFollowers: false);
+              }
             },
           ),
         ],

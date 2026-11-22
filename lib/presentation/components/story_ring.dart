@@ -392,7 +392,46 @@ class _StoryViewerState extends State<StoryViewer>
                 height: 22,
               ),
               onPressed: () {
-                // TODO: Show story options
+                showModalBottomSheet(
+                  context: context,
+                  backgroundColor: Colors.transparent,
+                  builder: (context) => Container(
+                    decoration: BoxDecoration(
+                      color: RippleColors.surface,
+                      borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(RippleConstants.borderRadiusXLarge),
+                      ),
+                    ),
+                    child: SafeArea(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ListTile(
+                            leading: SvgPicture.asset('assets/icons/flag.svg', width: 24, height: 24),
+                            title: const Text('Report story'),
+                            onTap: () {
+                              Navigator.of(context).pop();
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Thanks — our team reviews reports'),
+                                  behavior: SnackBarBehavior.floating,
+                                ),
+                              );
+                            },
+                          ),
+                          ListTile(
+                            leading: SvgPicture.asset('assets/icons/visibility_off.svg', width: 24, height: 24),
+                            title: const Text('Hide story'),
+                            onTap: () {
+                              Navigator.of(context).pop();
+                              widget.onClose();
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
               },
             ),
           ],

@@ -11,6 +11,7 @@ import 'package:ripple/core/utils/auth_guard.dart';
 import 'package:ripple/core/utils/guest_mode.dart';
 import 'package:ripple/presentation/components/story_ring.dart';
 import 'package:ripple/presentation/components/post_card.dart';
+import 'package:ripple/presentation/components/share_sheet.dart';
 
 class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
@@ -239,14 +240,11 @@ class _FeedScreenState extends State<FeedScreen> {
           ? 'Check out this post by @$author on Ripple!'
           : 'Check out this post on Ripple!';
 
-      showModalBottomSheet(
-        context: context,
-        backgroundColor: Colors.transparent,
-        builder: (context) => _ShareSheet(
-          postId: postId,
-          caption: caption,
-          shareText: text,
-        ),
+      ShareSheet.show(
+        context,
+        link: 'ripple://post/$postId',
+        caption: caption,
+        shareText: text,
       );
     }, actionName: 'share');
   }
@@ -640,107 +638,3 @@ class _StoryUser {
   });
 }
 
-/// Bottom sheet with the share link + native share button.
-class _ShareSheet extends StatelessWidget {
-  final String postId;
-  final String? caption;
-  final String shareText;
-
-  const _ShareSheet({
-    required this.postId,
-    required this.caption,
-    required this.shareText,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final link = 'ripple://post/$postId';
-    return Container(
-      decoration: BoxDecoration(
-        color: RippleColors.surface,
-        borderRadius: const BorderRadius.vertical(
-          top: Radius.circular(RippleConstants.borderRadiusXLarge),
-        ),
-      ),
-      padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 40,
-            height: 4,
-            decoration: BoxDecoration(
-              color: RippleColors.divider,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          const SizedBox(height: 20),
-          Text(
-            'Share Post',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 16),
-          if (caption != null && caption!.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Text(
-                caption!,
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: RippleColors.textSecondary,
-                ),
-              ),
-            ),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            decoration: BoxDecoration(
-              color: RippleColors.surfaceVariant,
-              borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
-            ),
-            child: Text(
-              link,
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: RippleColors.textTertiary,
-                fontFamily: 'monospace',
-              ),
-            ),
-          ),
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Share link copied')),
-                    );
-                  },
-                  child: const Text('Copy Link'),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Post shared')),
-                    );
-                  },
-                  icon: const Icon(Icons.share_outlined, size: 18),
-                  label: const Text('Share'),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-        ],
-      ),
-    );
-  }
-}

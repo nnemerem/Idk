@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -18,6 +19,7 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  final ImagePicker _picker = ImagePicker();
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _messageController = TextEditingController();
   List<Map<String, dynamic>> _messages = [];
@@ -117,6 +119,62 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  Future<void> _sendImage(ImageSource source) async {
+    final currentUserId = SupabaseService().currentUser?.id;
+    if (currentUserId == null || _isSending) return;
+
+    try {
+      final xfile = await _picker.pickImage(source: source);
+      if (xfile == null) return;
+
+      setState(() => _isSending = true);
+
+      final bytes = await xfile.readAsBytes();
+      final extension = xfile.name.contains('.') ? xfile.name.split('.').last.toLowerCase() : 'jpg';
+      final path = 'chat/$currentUserId/${DateTime.now().millisecondsSinceEpoch}.$extension';
+
+      final url = await SupabaseService().uploadFile(
+        bucket: RippleConstants.bucketPosts,
+        path: path,
+        bytes: bytes,
+        contentType: xfile.mimeType ?? 'image/jpeg',
+      );
+
+      if (url == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to upload image'), backgroundColor: RippleColors.error, behavior: SnackBarBehavior.floating),
+          );
+        }
+        return;
+      }
+
+      await SupabaseService().client.from(RippleConstants.tableMessages).insert({
+        'conversation_id': widget.conversationId,
+        'sender_id': currentUserId,
+        'content': '',
+        'media_url': url,
+        'message_type': 'image',
+        'created_at': DateTime.now().toIso8601String(),
+      });
+
+      await SupabaseService().client
+          .from(RippleConstants.tableConversations)
+          .update({'updated_at': DateTime.now().toIso8601String()})
+          .eq('id', widget.conversationId);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to send image'), backgroundColor: RippleColors.error, behavior: SnackBarBehavior.floating),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSending = false);
+      }
+    }
+  }
+
   Future<void> _sendMessage() async {
     final content = _messageController.text.trim();
     if (content.isEmpty || _isSending) return;
@@ -203,84 +261,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               )
             : const Text('Chat'),
-        actions: [
-          IconButton(
-            icon: SvgPicture.asset(
-              'assets/icons/video_call.svg',
-              width: 26,
-              height: 26,
-            ),
-            onPressed: () {
-              // TODO: Video call
-            },
-          ),
-          IconButton(
-            icon: SvgPicture.asset(
-              'assets/icons/call.svg',
-              width: 26,
-              height: 26,
-            ),
-            onPressed: () {
-              // TODO: Voice call
-            },
-          ),
-          PopupMenuButton<String>(
-            icon: SvgPicture.asset(
-              'assets/icons/more_vert.svg',
-              width: 26,
-              height: 26,
-            ),
-            color: RippleColors.surface,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
-            ),
-            onSelected: (value) {
-              // TODO: Handle menu actions
-            },
-            itemBuilder: (context) => [
-              PopupMenuItem(
-                value: 'media',
-                child: Row(
-                  children: [
-                    SvgPicture.asset('assets/icons/photo_library.svg', width: 18, height: 18),
-                    const SizedBox(width: 12),
-                    const Text('Media, Links & Docs'),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'search',
-                child: Row(
-                  children: [
-                    SvgPicture.asset('assets/icons/search.svg', width: 18, height: 18),
-                    const SizedBox(width: 12),
-                    const Text('Search'),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'mute',
-                child: Row(
-                  children: [
-                    SvgPicture.asset('assets/icons/mute.svg', width: 18, height: 18),
-                    const SizedBox(width: 12),
-                    const Text('Mute'),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'block',
-                child: Row(
-                  children: [
-                    SvgPicture.asset('assets/icons/block.svg', width: 18, height: 18),
-                    const SizedBox(width: 12),
-                    const Text('Block'),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ],
       ),
       body: _isLoading
           ? Center(child: CircularProgressIndicator(color: RippleColors.primary))
@@ -443,9 +423,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 height: 24,
                 colorFilter: ColorFilter.mode(RippleColors.textSecondary, BlendMode.srcIn),
               ),
-              onPressed: () {
-                // TODO: Pick image
-              },
+              onPressed: () => _sendImage(ImageSource.gallery),
             ),
             IconButton(
               icon: SvgPicture.asset(
@@ -454,9 +432,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 height: 24,
                 colorFilter: ColorFilter.mode(RippleColors.textSecondary, BlendMode.srcIn),
               ),
-              onPressed: () {
-                // TODO: Take photo
-              },
+              onPressed: () => _sendImage(ImageSource.camera),
             ),
             Expanded(
               child: Container(

@@ -6,6 +6,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
 import 'package:ripple/services/supabase_service.dart';
+import 'package:ripple/core/utils/guest_mode.dart';
 
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});
@@ -22,6 +23,7 @@ class _SearchScreenState extends State<SearchScreen> {
   List<Map<String, dynamic>> _reels = [];
   bool _isSearching = false;
   String _selectedTab = 'Top';
+  final Set<String> _followingIds = {};
 
   final List<String> _tabs = ['Top', 'Accounts', 'Tags', 'Places', 'Reels'];
 
@@ -95,6 +97,45 @@ class _SearchScreenState extends State<SearchScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _isSearching = false);
+      }
+    }
+  }
+
+  Future<void> _toggleFollow(Map<String, dynamic> user) async {
+    if (GuestMode.isGuestMode) {
+      GuestMode.showAuthRequired(context, 'follow');
+      return;
+    }
+    final targetId = user['id'] as String?;
+    if (targetId == null) return;
+
+    final currentlyFollowing = _followingIds.contains(targetId);
+    setState(() {
+      if (currentlyFollowing) {
+        _followingIds.remove(targetId);
+      } else {
+        _followingIds.add(targetId);
+      }
+    });
+
+    try {
+      if (currentlyFollowing) {
+        await SupabaseService().unfollowUser(targetId);
+      } else {
+        await SupabaseService().followUser(targetId);
+      }
+    } catch (e) {
+      setState(() {
+        if (currentlyFollowing) {
+          _followingIds.add(targetId);
+        } else {
+          _followingIds.remove(targetId);
+        }
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: const Text('Could not update follow status'), backgroundColor: RippleColors.error),
+        );
       }
     }
   }
@@ -341,10 +382,14 @@ class _SearchScreenState extends State<SearchScreen> {
         style: Theme.of(context).textTheme.bodySmall?.copyWith(color: RippleColors.textSecondary),
       ),
       trailing: TextButton(
-        onPressed: () {
-          // TODO: Follow/unfollow
-        },
-        child: const Text('Follow'),
+        onPressed: () => _toggleFollow(user),
+        child: Text(
+          _followingIds.contains(user['id']) ? 'Following' : 'Follow',
+          style: TextStyle(
+            color: _followingIds.contains(user['id']) ? RippleColors.textSecondary : RippleColors.primary,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
       ),
       onTap: () => context.go('/user/${user['username']}'),
     );
@@ -358,9 +403,7 @@ class _SearchScreenState extends State<SearchScreen> {
     if (mediaUrl == null) return const SizedBox.shrink();
 
     return GestureDetector(
-      onTap: () {
-        // TODO: Navigate to post detail
-      },
+      onTap: () => context.go('${RippleConstants.routeFeed}/post/${post['id']}'),
       child: CachedNetworkImage(
         imageUrl: mediaUrl,
         fit: BoxFit.cover,

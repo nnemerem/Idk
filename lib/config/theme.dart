@@ -95,7 +95,6 @@ class RippleTheme {
         scrolledUnderElevation: 0,
         centerTitle: false,
         titleTextStyle: const TextStyle(
-          fontFamily: 'Billabong',
           fontSize: 28,
           fontWeight: FontWeight.w400,
           color: RippleColors.textPrimary,
