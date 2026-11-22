@@ -61,6 +61,7 @@ class _ExploreScreenState extends State<ExploreScreen>
 
     try {
       List<Map<String, dynamic>> newPosts = [];
+      bool moreAvailable = false;
 
       if (_selectedCategory == 'Following') {
         // Only show posts from people the user follows.
@@ -97,7 +98,9 @@ class _ExploreScreenState extends State<ExploreScreen>
               .order('created_at', ascending: false)
               .range(_page * _perPage, (_page + 1) * _perPage - 1);
 
-          newPosts = List<Map<String, dynamic>>.from(response)
+          final rawPosts = List<Map<String, dynamic>>.from(response);
+          moreAvailable = rawPosts.length >= _perPage;
+          newPosts = rawPosts
               .where((p) => followedIds.contains(p['user_id']))
               .toList();
         }
@@ -114,6 +117,7 @@ class _ExploreScreenState extends State<ExploreScreen>
             .range(_page * _perPage, (_page + 1) * _perPage - 1);
 
         newPosts = List<Map<String, dynamic>>.from(response);
+        moreAvailable = newPosts.length >= _perPage;
       }
 
 
@@ -124,7 +128,7 @@ class _ExploreScreenState extends State<ExploreScreen>
           } else {
             _posts.addAll(newPosts);
           }
-          _hasMore = newPosts.length >= _perPage;
+          _hasMore = moreAvailable;
           _page++;
           _isLoading = false;
         });
