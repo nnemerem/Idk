@@ -322,27 +322,36 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
   }
 
   Widget _buildGalleryGrid() {
-    // In a real app, this would show the user's recent photos/videos
-    return GridView.builder(
-      padding: const EdgeInsets.all(16),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        crossAxisSpacing: 4,
-        mainAxisSpacing: 4,
-      ),
-      itemCount: 12,
-      itemBuilder: (context, index) => Container(
-        decoration: BoxDecoration(
-          color: RippleColors.surfaceVariant,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Center(
-          child: SvgPicture.asset(
-            'assets/icons/photo_library.svg',
-            width: 32,
-            height: 32,
-            colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
-          ),
+    // Gallery picking uses _pickMedia (system picker); no fake recent-media
+    // strip — an honest empty state instead of invented tiles.
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SvgPicture.asset(
+              'assets/icons/photo_library.svg',
+              width: 56,
+              height: 56,
+              colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Nothing picked yet',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                color: RippleColors.textSecondary,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Use the camera button above to pick a photo or video',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: RippleColors.textTertiary,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ),
       ),
     );
