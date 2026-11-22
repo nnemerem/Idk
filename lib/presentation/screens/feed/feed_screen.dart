@@ -31,6 +31,7 @@ class _FeedScreenState extends State<FeedScreen> {
   bool _hasMorePosts = true;
   int _postsPage = 0;
   static const int _postsPerPage = 10;
+  int _unreadNotifications = 0;
 
   @override
   void initState() {
@@ -38,7 +39,33 @@ class _FeedScreenState extends State<FeedScreen> {
     _loadStories();
     _loadPosts();
     _loadSavedPosts();
+    _loadUnreadNotifications();
     _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void didPopNext() {
+    super.didPopNext();
+    _loadUnreadNotifications();
+  }
+
+  Future<void> _loadUnreadNotifications() async {
+    final userId = SupabaseService().currentUser?.id;
+    if (userId == null) return;
+
+    try {
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableNotifications)
+          .select('id')
+          .eq('user_id', userId)
+          .eq('is_read', false);
+
+      if (mounted) {
+        setState(() => _unreadNotifications = (response as List).length);
+      }
+    } catch (e) {
+      if (mounted) setState(() => _unreadNotifications = 0);
+    }
   }
 
   @override
@@ -452,14 +479,40 @@ class _FeedScreenState extends State<FeedScreen> {
         ),
       ),
       actions: [
-        IconButton(
-          icon: SvgPicture.asset(
-            'assets/icons/notification.svg',
-            width: 28,
-            height: 28,
-          ),
-          tooltip: 'Notifications',
-          onPressed: () => context.go(RippleConstants.routeNotifications),
+        Stack(
+          alignment: Alignment.center,
+          children: [
+            IconButton(
+              icon: SvgPicture.asset(
+                'assets/icons/notification.svg',
+                width: 28,
+                height: 28,
+              ),
+              tooltip: 'Notifications',
+              onPressed: () => context.go(RippleConstants.routeNotifications),
+            ),
+            if (_unreadNotifications > 0)
+              Positioned(
+                right: 2,
+                top: 2,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: RippleColors.error,
+                    borderRadius: BorderRadius.circular(RippleConstants.borderRadiusFull),
+                  ),
+                  child: Text(
+                    _unreadNotifications > 99 ? '99+' : '$_unreadNotifications',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      height: 1.2,
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
         IconButton(
           icon: SvgPicture.asset(
