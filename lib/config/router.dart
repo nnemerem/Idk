@@ -1,499 +1,257 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-
-import '../presentation/screens/splash/splash_screen.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import '../core/utils/auth_guard.dart';
+import '../core/utils/guest_mode.dart';
 import '../presentation/screens/auth/login_screen.dart';
 import '../presentation/screens/auth/register_screen.dart';
-import '../presentation/screens/main_shell.dart';
+import '../presentation/screens/auth/splash_screen.dart';
 import '../presentation/screens/feed/feed_screen.dart';
-import '../presentation/screens/discover/discover_screen.dart';
-import '../presentation/screens/books/books_library_screen.dart';
-import '../presentation/screens/books/book_editor_screen.dart';
-import '../presentation/screens/books/publish_details_screen.dart';
-import '../presentation/screens/books/book_details_screen.dart';
-import '../presentation/screens/dms/dm_list_screen.dart';
-import '../presentation/screens/dms/dm_chat_screen.dart';
-import '../presentation/screens/chat/chat_screen.dart';
-import '../presentation/screens/chat/random_chat_screen.dart';
-import '../presentation/screens/reader/reader_screen.dart';
-import '../presentation/screens/wrapped/wrapped_screen.dart';
-import '../presentation/screens/settings/settings_screen.dart';
-import '../presentation/screens/wallet/wallet_screen.dart';
-import '../presentation/screens/wallet/store_screen.dart';
-import '../presentation/screens/jenny/jenny_screen.dart';
-import '../presentation/screens/dictionary/dictionary_screen.dart';
-import '../presentation/screens/dictionary/word_detail_screen.dart';
-import '../services/dictionary_service.dart';
-import '../presentation/screens/events/events_agenda_screen.dart';
-import '../presentation/screens/streaks/streaks_screen.dart';
-import '../presentation/screens/settings/edit_profile_screen.dart';
-import '../presentation/screens/library/my_library_screen.dart';
-import '../presentation/screens/notifications/notifications_screen.dart';
-import '../presentation/screens/profile/author_profile_screen.dart';
-import '../presentation/screens/profile/follow_list_screen.dart';
-import '../presentation/screens/books/writer_dashboard_screen.dart';
-import '../presentation/screens/books/manage_book_screen.dart';
-import '../presentation/screens/books/chapter_manager_screen.dart';
-import '../presentation/screens/books/chapter_editor_screen.dart';
-import 'package:flutter/material.dart' show GlobalKey, NavigatorState;
-
-import '../presentation/components/booknest_ui.dart';
-import '../presentation/screens/books/book_analytics_screen.dart';
-import '../presentation/screens/books/reviews_hub_screen.dart';
-import '../presentation/screens/books/book_reviews_screen.dart';
-import '../presentation/screens/books/book_discussion_screen.dart';
-import '../presentation/screens/books/genre_browse_screen.dart';
-import '../presentation/screens/search/global_search_screen.dart';
-import '../presentation/screens/onboarding/onboarding_screen.dart';
-import '../presentation/screens/auth/profile_setup_screen.dart';
-import '../presentation/screens/support/privacy_screen.dart';
-import '../presentation/screens/support/terms_screen.dart';
-import '../presentation/screens/settings/chat_backup_screen.dart';
-import '../presentation/screens/moderation/moderation_screen.dart';
-import '../presentation/screens/brainstorm/brainstorm_screen.dart';
-import '../presentation/screens/auth/suspend_gate_screen.dart';
-import '../presentation/screens/moderator/insights_screen.dart';
-import '../presentation/screens/moderator/mass_message_screen.dart';
-import '../presentation/screens/moderator/users_screen.dart';
-import '../presentation/screens/chat/shared_content_screen.dart';
-import '../presentation/screens/support/about_screen.dart';
-import '../presentation/screens/support/connection_status_screen.dart';
-import '../presentation/screens/support/permissions_screen.dart';
+import '../presentation/screens/reels/reels_screen.dart';
+import '../presentation/screens/explore/explore_screen.dart';
+import '../presentation/screens/dms/dms_list_screen.dart';
 import '../presentation/screens/profile/profile_screen.dart';
-import '../presentation/screens/feed/create_quote_screen.dart';
-import '../presentation/screens/feed/create_news_screen.dart';
-import '../presentation/screens/feed/create_poll_screen.dart';
-import '../presentation/screens/feed/create_event_screen.dart';
-import '../presentation/screens/discover/create_club_screen.dart';
-import '../presentation/screens/discover/create_community_screen.dart';
-import '../presentation/screens/discover/create_organization_screen.dart';
-import '../presentation/screens/discover/create_school_screen.dart';
-import '../presentation/screens/clubs/club_detail_screen.dart';
-import '../presentation/screens/discover/community_detail_screen.dart';
-import '../presentation/screens/discover/organization_detail_screen.dart';
-import '../presentation/screens/discover/school_detail_screen.dart';
-import '../services/backend_api.dart';
-import '../services/supabase_service.dart';
-
-/// Routes that must never be reached while signed out.
-///
-/// Covers the fullscreen editor/reader plus every "create" flow, since those
-/// handlers read [SupabaseService().auth.currentUser] and would otherwise
-/// throw for anonymous visitors.
-const Set<String> _protectedRoutes = {
-  '/editor',
-  '/publish-details',
-  '/club-chat',
-  '/reader',
-  '/chat',
-  '/settings',
-  '/library',
-  '/notifications',
-  '/dashboard',
-  '/manage',
-  '/write-chapter',
-  '/analytics',
-  '/my-reviews',
-  '/onboarding',
-  '/create/club',
-  '/create/community',
-  '/create/organization',
-  '/create/school',
-  '/create/quote',
-  '/create/news',
-  '/create/poll',
-  '/create/event',
-  '/wallet',
-  '/jenny',
-  '/events',
-  '/streaks',
-};
-
-/// Global auth redirect.
-///
-/// Intercepts navigation to protected fullscreen routes and sends
-/// unauthenticated users to `/login`.
-String? _redirect(BuildContext context, GoRouterState state) {
-  final path = state.uri.path;
-  final isLoggedIn = SupabaseService().auth.currentUser != null;
-
-  final isAuthRoute = path == '/login' || path == '/register';
-  final isProtected =
-      _protectedRoutes.any((route) => path == route || path.startsWith('$route/'));
-
-  if (!isLoggedIn) {
-    if (isProtected) return '/login';
-    return null;
-  }
-
-  // Already signed in users are sent away from the login/register screens.
-  if (isAuthRoute) return '/feed';
-
-  return null;
-}
-
-/// Root navigator key — used by system-level overlays (calls).
-final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
+import '../presentation/screens/create/create_post_screen.dart';
+import '../presentation/screens/create/create_reel_screen.dart';
+import '../presentation/screens/create/create_story_screen.dart';
+import '../presentation/screens/post/post_detail_screen.dart';
+import '../presentation/screens/reels/reel_detail_screen.dart';
+import '../presentation/screens/profile/user_profile_screen.dart';
+import '../presentation/screens/chat/chat_screen.dart';
+import '../presentation/screens/search/search_screen.dart';
+import '../presentation/screens/settings/settings_screen.dart';
+import '../presentation/screens/profile/edit_profile_screen.dart';
+import '../presentation/components/ripple_bottom_nav.dart';
+import 'constants.dart';
 
 final GoRouter appRouter = GoRouter(
-  initialLocation: '/splash',
+  initialLocation: RippleConstants.routeSplash,
   redirect: _redirect,
   routes: [
+    // Auth routes (no bottom nav)
     GoRoute(
-      path: '/splash',
+      path: RippleConstants.routeSplash,
+      name: 'splash',
       builder: (context, state) => const SplashScreen(),
     ),
     GoRoute(
-      path: '/login',
+      path: RippleConstants.routeLogin,
+      name: 'login',
       builder: (context, state) => const LoginScreen(),
     ),
     GoRoute(
-      path: '/register',
+      path: RippleConstants.routeRegister,
+      name: 'register',
       builder: (context, state) => const RegisterScreen(),
     ),
-    GoRoute(
-      path: '/editor',
-      builder: (context, state) {
-        final clubId = state.uri.queryParameters['clubId'];
-        return BookEditorScreen(clubId: clubId);
-      },
-    ),
-    GoRoute(
-      path: '/editor/book/:id',
-      builder: (context, state) => FutureBuilder<Map<String, dynamic>?>(
-        future: BackendApi.instance
-            .fetchBook(state.pathParameters['id'] ?? '')
-            .then((res) {
-              final book = res?['book'];
-              return book is Map
-                  ? Map<String, dynamic>.from(book)
-                  : null;
-            }),
-        builder: (context, snap) {
-          final book = snap.data;
-          if (book == null) {
-            return const Scaffold(
-              body: Center(child: BookNestLoader(size: 64)),
-            );
-          }
-          return BookEditorScreen.edit(book: book);
-        },
-      ),
-    ),
-    GoRoute(
-      path: '/book/:id',
-      builder: (context, state) => BookDetailsScreen(
-        bookId: state.pathParameters['id'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/book/:id/reviews',
-      builder: (context, state) => BookReviewsScreen(
-        bookId: state.pathParameters['id'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/book/:id/discussion',
-      builder: (context, state) => BookDiscussionScreen(
-        bookId: state.pathParameters['id'] ?? '',
-      ),
-    ),
-    // ── Account & library ──
-    GoRoute(path: '/settings', builder: (context, state) => const SettingsScreen()),
-    GoRoute(path: '/status', builder: (context, state) => const ConnectionStatusScreen()),
-    GoRoute(path: '/permissions', builder: (context, state) => const PermissionsScreen()),
-    GoRoute(path: '/wallet', builder: (context, state) => const WalletScreen()),
-    GoRoute(path: '/store', builder: (context, state) => const StoreScreen()),
-    GoRoute(path: '/jenny', builder: (context, state) => const JennyScreen()),
 
-    GoRoute(
-      path: '/dictionary',
-      builder: (context, state) => DictionaryScreen(
-        initialQuery: state.uri.queryParameters['q'],
-      ),
-    ),
-    GoRoute(
-      path: '/dictionary/word',
-      builder: (context, state) {
-        final extra = state.extra;
-        if (extra is WordEntry) return WordDetailScreen(entry: extra);
-        return const DictionaryScreen();
-      },
-    ),
-    GoRoute(
-        path: '/events',
-        builder: (context, state) => const EventsAgendaScreen()),
-    GoRoute(
-        path: '/streaks',
-        builder: (context, state) => const StreaksScreen()),
-    GoRoute(
-      path: '/settings/edit-profile',
-      builder: (context, state) => const EditProfileScreen(),
-    ),
-    GoRoute(path: '/library', builder: (context, state) => const MyLibraryScreen()),
-    GoRoute(
-      path: '/notifications',
-      builder: (context, state) => const NotificationsScreen(),
-    ),
-    GoRoute(
-      path: '/onboarding',
-      builder: (context, state) => const OnboardingScreen(),
-    ),
-    GoRoute(
-      path: '/profile-setup',
-      builder: (context, state) => const ProfileSetupScreen(),
-    ),
-    // ── Social ──
-    GoRoute(
-      path: '/user/:id',
-      builder: (context, state) => AuthorProfileScreen(
-        userId: state.pathParameters['id'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/user/:id/follows',
-      builder: (context, state) => FollowListScreen(
-        userId: state.pathParameters['id'] ?? '',
-        type: state.uri.queryParameters['type'] == 'following'
-            ? 'following'
-            : 'followers',
-      ),
-    ),
-    // ── Writer tools ──
-    GoRoute(
-      path: '/dashboard',
-      builder: (context, state) => const WriterDashboardScreen(),
-    ),
-    GoRoute(
-      path: '/manage/:bookId',
-      builder: (context, state) => ManageBookScreen(
-        bookId: state.pathParameters['bookId'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/manage/:bookId/chapters',
-      builder: (context, state) => ChapterManagerScreen(
-        bookId: state.pathParameters['bookId'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/write-chapter',
-      builder: (context, state) => ChapterEditorScreen(
-        bookId: state.uri.queryParameters['bookId'] ?? '',
-        chapterNumber:
-            int.tryParse(state.uri.queryParameters['number'] ?? '1') ?? 1,
-        initialTitle: state.uri.queryParameters['title'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/analytics/:bookId',
-      builder: (context, state) => BookAnalyticsScreen(
-        bookId: state.pathParameters['bookId'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/my-reviews',
-      builder: (context, state) => const ReviewsHubScreen(),
-    ),
-    // ── Discovery ──
-    GoRoute(
-      path: '/genre',
-      builder: (context, state) => GenreBrowseScreen(
-        genre: state.uri.queryParameters['name'] ?? 'Romance',
-      ),
-    ),
-    GoRoute(
-      path: '/search',
-      builder: (context, state) => const GlobalSearchScreen(),
-    ),
-    // ── Support ──
-    GoRoute(path: '/moderation', builder: (context, state) => const ModerationScreen()),
-    GoRoute(path: '/privacy', builder: (context, state) => const PrivacyScreen()),
-    GoRoute(path: '/terms', builder: (context, state) => const TermsScreen()),
-    GoRoute(
-        path: '/settings/chat-backup',
-        builder: (context, state) => const ChatBackupScreen()),
-    GoRoute(path: '/about', builder: (context, state) => const AboutScreen()),
-    // Telegram-style chat, opened full-screen (nav bar hidden).
-    // `/chat/<conversationId>` continues a chat; `/chat/peer/<peerId>`
-    // starts one (the edge function reuses the 1:1 conversation).
-    GoRoute(
-      path: '/random-chat',
-      builder: (context, state) => const RandomChatScreen(),
-    ),
-    GoRoute(
-      path: '/chat/peer/:peerId',
-      builder: (context, state) => DMChatScreen(
-        peerId: state.pathParameters['peerId'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/chat/:conversationId',
-      builder: (context, state) => DMChatScreen(
-        conversationId: state.pathParameters['conversationId'] ?? '',
-        peerId: state.uri.queryParameters['peer'],
-      ),
-    ),
-    GoRoute(
-      path: '/wrapped',
-      builder: (context, state) => const WrappedScreen(),
-    ),
-    GoRoute(
-      path: '/reader',
-      builder: (context, state) => ReaderScreen(
-        bookId: state.uri.queryParameters['bookId'] ?? '',
-        initialChapter: int.tryParse(
-            state.uri.queryParameters['chapter'] ?? ''),
-      ),
-    ),
-    GoRoute(
-      path: '/club-chat',
-      builder: (context, state) => ChatScreen(
-        clubId: state.uri.queryParameters['id'] ?? '',
-        kind: state.uri.queryParameters['kind'] ?? 'clubs',
-        title: state.uri.queryParameters['title'] ?? 'Group chat',
-        unitId: state.uri.queryParameters['unit'] ?? '',
-        channelName: state.uri.queryParameters['chan'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/publish-details',
-      builder: (context, state) {
-        final bookId = state.uri.queryParameters['bookId'] ?? '';
-        return PublishDetailsScreen(bookId: bookId);
-      },
-    ),
-    // Feed content creation routes (fullscreen, hide the nav bar).
-    GoRoute(
-      path: '/create/quote',
-      builder: (context, state) => const CreateQuoteScreen(),
-    ),
-    GoRoute(
-      path: '/create/news',
-      builder: (context, state) => const CreateNewsScreen(),
-    ),
-    GoRoute(
-      path: '/create/poll',
-      builder: (context, state) => const CreatePollScreen(),
-    ),
-    GoRoute(
-      path: '/create/event',
-      builder: (context, state) => const CreateEventScreen(),
-    ),
-    // Discover creation routes (fullscreen, hide the nav bar).
-    GoRoute(
-      path: '/create/club',
-      builder: (context, state) => const CreateClubScreen(),
-    ),
-    GoRoute(
-      path: '/create/community',
-      builder: (context, state) => const CreateCommunityScreen(),
-    ),
-    GoRoute(
-      path: '/create/organization',
-      builder: (context, state) => const CreateOrganizationScreen(),
-    ),
-    GoRoute(
-      path: '/create/school',
-      builder: (context, state) => const CreateSchoolScreen(),
-    ),
-    GoRoute(
-      path: '/club/:id',
-      builder: (context, state) => ClubDetailScreen(
-        clubId: state.pathParameters['id'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/moderator',
-      builder: (context, state) => const InsightsScreen(),
-    ),
-    GoRoute(
-      path: '/moderator/users',
-      builder: (context, state) => const UsersScreen(),
-    ),
-    GoRoute(
-      path: '/moderator/mass',
-      builder: (context, state) => const MassMessageScreen(),
-    ),
-    GoRoute(
-      path: '/shared/:conversationId',
-      builder: (context, state) => SharedContentScreen(
-        conversationId: state.pathParameters['conversationId'] ?? '',
-        title: state.uri.queryParameters['title'] ?? 'Chat',
-      ),
-    ),
-    GoRoute(
-      path: '/brainstorm',
-      builder: (context, state) => const BrainstormScreen(),
-    ),
-    GoRoute(
-      path: '/community/:id',
-      builder: (context, state) => CommunityDetailScreen(
-        id: state.pathParameters['id'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/organization/:id',
-      builder: (context, state) => OrganizationDetailScreen(
-        id: state.pathParameters['id'] ?? '',
-      ),
-    ),
-    GoRoute(
-      path: '/school/:id',
-      builder: (context, state) => SchoolDetailScreen(
-        id: state.pathParameters['id'] ?? '',
-      ),
-    ),
+    // Main shell with bottom navigation
     StatefulShellRoute.indexedStack(
-      builder: (context, state, navigationShell) =>
-          MainShell(navigationShell: navigationShell),
+      builder: (context, state, navigationShell) {
+        return RippleBottomNav(navigationShell: navigationShell);
+      },
       branches: [
-        // Tab 1: Feed
+        // Feed branch (Home)
         StatefulShellBranch(
           routes: [
             GoRoute(
-              path: '/feed',
+              path: RippleConstants.routeFeed,
+              name: 'feed',
               builder: (context, state) => const FeedScreen(),
+              routes: [
+                GoRoute(
+                  path: 'post/:postId',
+                  name: 'post-detail',
+                  builder: (context, state) => PostDetailScreen(
+                    postId: state.pathParameters['postId']!,
+                  ),
+                ),
+              ],
             ),
           ],
         ),
-        // Tab 2: Discover
+
+        // Reels branch
         StatefulShellBranch(
           routes: [
             GoRoute(
-              path: '/discover',
-              builder: (context, state) => const DiscoverScreen(),
+              path: RippleConstants.routeReels,
+              name: 'reels',
+              builder: (context, state) => const ReelsScreen(),
+              routes: [
+                GoRoute(
+                  path: 'reel/:reelId',
+                  name: 'reel-detail',
+                  builder: (context, state) => ReelDetailScreen(
+                    reelId: state.pathParameters['reelId']!,
+                  ),
+                ),
+              ],
             ),
           ],
         ),
-        // Tab 3: Books (center FAB)
+
+        // Explore branch
         StatefulShellBranch(
           routes: [
             GoRoute(
-              path: '/books',
-              builder: (context, state) => const BooksLibraryScreen(),
+              path: RippleConstants.routeExplore,
+              name: 'explore',
+              builder: (context, state) => const ExploreScreen(),
             ),
           ],
         ),
-        // Tab 4: Messages
+
+        // DMs branch
         StatefulShellBranch(
           routes: [
             GoRoute(
-              path: '/dms',
-              builder: (context, state) => const DMListScreen(),
+              path: RippleConstants.routeDms,
+              name: 'dms',
+              builder: (context, state) => const DmsListScreen(),
+              routes: [
+                GoRoute(
+                  path: 'chat/:conversationId',
+                  name: 'chat',
+                  builder: (context, state) => ChatScreen(
+                    conversationId: state.pathParameters['conversationId']!,
+                  ),
+                ),
+              ],
             ),
           ],
         ),
-        // Tab 5: Profile
+
+        // Profile branch
         StatefulShellBranch(
           routes: [
             GoRoute(
-              path: '/profile',
+              path: RippleConstants.routeProfile,
+              name: 'profile',
               builder: (context, state) => const ProfileScreen(),
+              routes: [
+                GoRoute(
+                  path: 'user/:username',
+                  name: 'user-profile',
+                  builder: (context, state) => UserProfileScreen(
+                    username: state.pathParameters['username']!,
+                  ),
+                ),
+                GoRoute(
+                  path: 'settings',
+                  name: 'settings',
+                  builder: (context, state) => const SettingsScreen(),
+                ),
+                GoRoute(
+                  path: 'edit-profile',
+                  name: 'edit-profile',
+                  builder: (context, state) => const EditProfileScreen(),
+                ),
+              ],
             ),
           ],
         ),
       ],
     ),
+
+    // Create routes (modal/full screen, no bottom nav)
+    GoRoute(
+      path: RippleConstants.routeCreatePost,
+      name: 'create-post',
+      builder: (context, state) => const CreatePostScreen(),
+    ),
+    GoRoute(
+      path: RippleConstants.routeCreateReel,
+      name: 'create-reel',
+      builder: (context, state) => const CreateReelScreen(),
+    ),
+    GoRoute(
+      path: RippleConstants.routeCreateStory,
+      name: 'create-story',
+      builder: (context, state) => const CreateStoryScreen(),
+    ),
+
+    // Search route
+    GoRoute(
+      path: RippleConstants.routeSearch,
+      name: 'search',
+      builder: (context, state) => const SearchScreen(),
+    ),
+
+    // Public user profile (accessible from anywhere)
+    GoRoute(
+      path: RippleConstants.routeUserProfile,
+      name: 'public-user-profile',
+      builder: (context, state) => UserProfileScreen(
+        username: state.pathParameters['username']!,
+      ),
+    ),
   ],
 );
+
+String? _redirect(BuildContext context, GoRouterState state) {
+  final session = Supabase.instance.client.auth.currentSession;
+  final isLoggedIn = session != null;
+  final isGuest = GuestMode.isGuestMode;
+  final location = state.uri.toString();
+
+  // Routes that guests CAN access (view-only)
+  final guestAllowedRoutes = [
+    RippleConstants.routeFeed,
+    RippleConstants.routeReels,
+    RippleConstants.routeExplore,
+    RippleConstants.routeSearch,
+    RippleConstants.routeFeed + '/post/',  // Post detail
+    RippleConstants.routeReels + '/reel/', // Reel detail
+    RippleConstants.routeUserProfile,      // Public profiles
+  ];
+
+  // Routes that require authentication (create, edit, DMs, profile settings)
+  final authRequiredRoutes = [
+    RippleConstants.routeDms,
+    RippleConstants.routeDms + '/chat/',
+    RippleConstants.routeProfile,
+    RippleConstants.routeCreatePost,
+    RippleConstants.routeCreateReel,
+    RippleConstants.routeCreateStory,
+    RippleConstants.routeSettings,
+    RippleConstants.routeEditProfile,
+  ];
+
+  // Auth routes that should redirect logged-in users
+  final authRoutes = [
+    RippleConstants.routeLogin,
+    RippleConstants.routeRegister,
+  ];
+
+  final isGuestAllowedRoute = guestAllowedRoutes.any((route) => location.startsWith(route));
+  final isAuthRequiredRoute = authRequiredRoutes.any((route) => location.startsWith(route));
+  final isAuthRoute = authRoutes.any((route) => location.startsWith(route));
+
+  // Allow guests to access view-only routes
+  if (isGuest && isGuestAllowedRoute) {
+    return null; // Allow access
+  }
+
+  // Block guests from auth-required routes
+  if (isGuest && isAuthRequiredRoute) {
+    return RippleConstants.routeLogin;
+  }
+
+  // Redirect unauthenticated users from protected routes to login
+  if (!isLoggedIn && !isGuest && isAuthRequiredRoute) {
+    return RippleConstants.routeLogin;
+  }
+
+  // Redirect authenticated users from auth routes to feed
+  if ((isLoggedIn || isGuest) && isAuthRoute) {
+    return RippleConstants.routeFeed;
+  }
+
+  // Redirect from root to feed
+  if (location == '/') {
+    return (isLoggedIn || isGuest) ? RippleConstants.routeFeed : RippleConstants.routeLogin;
+  }
+
+  return null;
+}

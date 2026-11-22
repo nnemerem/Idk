@@ -1,22 +1,15 @@
-// lib/presentation/screens/feed/feed_screen.dart
-
-import 'dart:async' show unawaited;
-import 'dart:math';
-import 'dart:ui';
-
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
-
-import '../../../config/theme.dart';
-import '../../components/post_extras.dart';
-import '../../../services/backend_api.dart';
-import '../../../services/supabase_service.dart';
-import '../../components/booknest_ui.dart';
-import '../../components/skeleton_kit.dart';
-import '../../components/report_sheet.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:timeago/timeago.dart' as timeago;
+import 'package:cached_network_image/cached_network_image.dart';
+import '../../config/theme.dart';
+import '../../config/constants.dart';
+import '../../config/router.dart';
+import '../../services/supabase_service.dart';
+import '../../core/utils/auth_guard.dart';
+import '../../presentation/components/story_ring.dart';
+import '../../presentation/components/post_card.dart';
 
 class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
@@ -25,1815 +18,607 @@ class FeedScreen extends StatefulWidget {
   State<FeedScreen> createState() => _FeedScreenState();
 }
 
-class _FeedScreenState extends State<FeedScreen>
-    with SingleTickerProviderStateMixin {
-  List<dynamic> _posts = [];
-  List<dynamic> _filteredPosts = [];
-  bool _isLoading = true;
-  String _activeFilter = 'All';
-  bool _isStylusOpen = false;
-
-  late AnimationController _stylusController;
-  late Animation<double> _stylusRotation;
-
-  final List<String> _filters = [
-    'All',
-    'Quote',
-    'News',
-    'Poll',
-    'Event',
-    'Article',
-  ];
-
-  final List<_PostType> _postTypes = const [
-    _PostType(label: 'Quote', icon: Icons.format_quote, color: BookNestColors.cyan),
-    _PostType(label: 'News', icon: Icons.newspaper, color: BookNestColors.navy),
-    _PostType(label: 'Poll', icon: Icons.poll, color: BookNestColors.cyan),
-    _PostType(label: 'Event', icon: Icons.event, color: BookNestColors.navy),
-    _PostType(label: 'Article', icon: Icons.article, color: BookNestColors.navy),
-  ];
+class _FeedScreenState extends State<FeedScreen> {
+  final ScrollController _scrollController = ScrollController();
+  List<Map<String, dynamic>> _posts = [];
+  List<Map<String, dynamic>> _stories = [];
+  bool _isLoadingPosts = false;
+  bool _isLoadingStories = true;
+  bool _hasMorePosts = true;
+  int _postsPage = 0;
+  static const int _postsPerPage = 10;
 
   @override
   void initState() {
     super.initState();
-    _stylusController = AnimationController(
-      duration: const Duration(milliseconds: 300),
-      vsync: this,
-    );
-    _stylusRotation = Tween<double>(begin: 0, end: 0.5).animate(
-      CurvedAnimation(parent: _stylusController, curve: Curves.easeOutBack),
-    );
-    _loadPosts();
+    _loadInitialData();
+    _scrollController.addListener(_onScroll);
   }
 
-  Future<void> _loadPosts() async {
-    // Cutover: the feed lives on the app's own data store now; the legacy
-    // SQL read remains as a graceful fallback while devices update.
-    List<dynamic> response;
-    try {
-      final res = await BackendApi.instance.callFresh('posts.list');
-      response = (res?['posts'] as List?) ?? const [];
-    } catch (_) {
-      response = const [];
-    }
-    if (response.isEmpty) {
-      try {
-        response = await SupabaseService()
-            .client
-            .from('posts')
-            .select('*, profiles(username, avatar_url)')
-            .order('created_at', ascending: false);
-      } catch (_) {}
-    }
-    try {
-      // Attach cloud like stats (best-effort — the feed never blocks on it).
-      final ids = <String>[];
-      for (final p in response) {
-        if (p is Map && p['id'] != null) ids.add(p['id'].toString());
-      }
-      final stats = ids.isNotEmpty
-          ? await SupabaseService().feedStats(ids)
-          : <String, Map<String, dynamic>>{};
-      for (final p in response) {
-        if (p is! Map) continue;
-        final s = stats[p['id']?.toString()];
-        if (s != null) {
-          p['like_count'] = s['likeCount'];
-          p['liked_by_me'] = s['likedByMe'];
-        }
-      }
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
-      setState(() {
-        _posts = response;
-        _filteredPosts = response;
-        _isLoading = false;
-      });
-      // Count this visit's views (the cloud dedupes per reader per day).
-      if (ids.isNotEmpty) {
-        BackendApi.instance
-            .call('posts.view', {'postIds': ids})
-            .catchError((_) => null);
+  Future<void> _loadInitialData() async {
+    await Future.wait([
+      _loadStories(),
+      _loadPosts(),
+    ]);
+  }
+
+  Future<void> _loadStories() async {
+    try {
+      // Get stories from followed users + current user
+      final currentUserId = SupabaseService().currentUser?.id;
+      if (currentUserId == null) return;
+
+      // For now, get recent stories from all users (in production, filter by follows)
+      final response = await SupabaseService().client
+          .from(RippleConstants.tableStories)
+          .select('''
+            *,
+            profiles:user_id (id, username, display_name, avatar_url)
+          ''')
+          .gte('expires_at', DateTime.now().toIso8601String())
+          .order('created_at', ascending: false)
+          .limit(50);
+
+      if (mounted) {
+        setState(() {
+          _stories = List<Map<String, dynamic>>.from(response);
+          _isLoadingStories = false;
+        });
       }
     } catch (e) {
-      setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() => _isLoadingStories = false);
+      }
     }
   }
 
-  void _removePostLocally(int index) {
-    if (index < 0 || index >= _filteredPosts.length) return;
-    final id = _filteredPosts[index]['id']?.toString();
-    setState(() {
-      _filteredPosts.removeAt(index);
-      if (id != null) {
-        _posts.removeWhere((p) => p['id']?.toString() == id);
+  Future<void> _loadPosts({bool refresh = false}) async {
+    if (_isLoadingPosts) return;
+
+    setState(() => _isLoadingPosts = true);
+
+    if (refresh) {
+      _postsPage = 0;
+      _hasMorePosts = true;
+    }
+
+    try {
+      final currentUserId = SupabaseService().currentUser?.id;
+      if (currentUserId == null) return;
+
+      // Get posts from followed users + current user
+      // For now, get all posts (in production, join with follows table)
+      final response = await SupabaseService().client
+          .from(RippleConstants.tablePosts)
+          .select('''
+            *,
+            profiles:user_id (id, username, display_name, avatar_url),
+            likes:post_likes (count),
+            comments:post_comments (count),
+            is_liked:post_likes!inner (user_id)
+          ''')
+          .order('created_at', ascending: false)
+          .range(_postsPage * _postsPerPage, (_postsPage + 1) * _postsPerPage - 1);
+
+      final newPosts = List<Map<String, dynamic>>.from(response);
+
+      if (mounted) {
+        setState(() {
+          if (refresh) {
+            _posts = newPosts;
+          } else {
+            _posts.addAll(newPosts);
+          }
+          _hasMorePosts = newPosts.length >= _postsPerPage;
+          _postsPage++;
+          _isLoadingPosts = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoadingPosts = false);
+      }
+    }
+  }
+
+  void _onScroll() {
+    if (_scrollController.position.pixels >=
+        _scrollController.position.maxScrollExtent - 200) {
+      _loadPosts();
+    }
+  }
+
+  Future<void> _onRefresh() async {
+    await _loadPosts(refresh: true);
+    await _loadStories();
+  }
+
+  void _onLikePost(String postId, bool currentlyLiked) {
+    AuthGuard.run(context, onAuthenticated: () async {
+      try {
+        if (currentlyLiked) {
+          await SupabaseService().client
+              .from('post_likes')
+              .delete()
+              .eq('post_id', postId)
+              .eq('user_id', SupabaseService().currentUser!.id);
+        } else {
+          await SupabaseService().client.from('post_likes').insert({
+            'post_id': postId,
+            'user_id': SupabaseService().currentUser!.id,
+            'created_at': DateTime.now().toIso8601String(),
+          });
+        }
+        // Optimistic update
+        setState(() {
+          final index = _posts.indexWhere((p) => p['id'] == postId);
+          if (index != -1) {
+            final likesCount = _posts[index]['likes']?['count'] ?? 0;
+            _posts[index]['likes'] = {'count': currentlyLiked ? likesCount - 1 : likesCount + 1};
+            _posts[index]['is_liked'] = !currentlyLiked;
+          }
+        });
+      } catch (e) {
+        // Revert on error
+        setState(() {});
+      }
+    }, actionName: 'like');
+  }
+      try {
+        if (currentlyLiked) {
+          await SupabaseService().client
+              .from('post_likes')
+              .delete()
+              .eq('post_id', postId)
+              .eq('user_id', SupabaseService().currentUser!.id);
+        } else {
+          await SupabaseService().client.from('post_likes').insert({
+            'post_id': postId,
+            'user_id': SupabaseService().currentUser!.id,
+            'created_at': DateTime.now().toIso8601String(),
+          });
+        }
+        // Optimistic update
+        setState(() {
+          final index = _posts.indexWhere((p) => p['id'] == postId);
+          if (index != -1) {
+            final likesCount = _posts[index]['likes']?['count'] ?? 0;
+            _posts[index]['likes'] = {'count': currentlyLiked ? likesCount - 1 : likesCount + 1};
+            _posts[index]['is_liked'] = !currentlyLiked;
+          }
+        });
+      } catch (e) {
+        // Revert on error
+        setState(() {});
       }
     });
   }
 
-  void _filterPosts(String filter) {
-    setState(() {
-      _activeFilter = filter;
-      if (filter == 'All') {
-        _filteredPosts = _posts;
-      } else {
-        _filteredPosts = _posts.where((p) => p['type'] == filter.toLowerCase()).toList();
+  void _onSavePost(String postId) {
+    AuthGuard.run(context, onAuthenticated: () async {
+      try {
+        await SupabaseService().client.from(RippleConstants.tableSavedPosts).upsert({
+          'user_id': SupabaseService().currentUser!.id,
+          'post_id': postId,
+          'created_at': DateTime.now().toIso8601String(),
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Post saved'),
+              behavior: SnackBarBehavior.floating,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to save post'),
+              backgroundColor: RippleColors.error,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      }
+    }, actionName: 'save');
+  }
+      try {
+        await SupabaseService().client.from(RippleConstants.tableSavedPosts).upsert({
+          'user_id': SupabaseService().currentUser!.id,
+          'post_id': postId,
+          'created_at': DateTime.now().toIso8601String(),
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Post saved'),
+              behavior: SnackBarBehavior.floating,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to save post'),
+              backgroundColor: RippleColors.error,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
       }
     });
   }
 
-  void _toggleStylus() {
-    setState(() => _isStylusOpen = !_isStylusOpen);
-    if (_isStylusOpen) {
-      _stylusController.forward();
-    } else {
-      _stylusController.reverse();
-    }
+  void _onSharePost(String postId) {
+    AuthGuard.run(context, onAuthenticated: () {
+      // TODO: Implement share functionality
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Share feature coming soon'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }, actionName: 'share');
   }
-
-  Future<void> _onPostTypeTap(_PostType type) async {
-    _toggleStylus();
-    switch (type.label) {
-      case 'Quote':
-        await context.push('/create/quote');
-        break;
-      case 'News':
-        await context.push('/create/news');
-        break;
-      case 'Poll':
-        await context.push('/create/poll');
-        break;
-      case 'Event':
-        await context.push('/create/event');
-        break;
-      case 'Article':
-        await context.push('/editor');
-        break;
-    }
-    _loadPosts();
+      // TODO: Implement share functionality
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Share feature coming soon'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Stack(
-        children: [
-          // Main content
-          SafeArea(
-            child: Column(
-              children: [
-                // Header
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'Feed',
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.onSurface,
-                          fontSize: 28,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                      Row(
-                        children: [
-                          IconButton(
-                            tooltip: 'Search',
-                            icon: const Icon(Icons.search),
-                            onPressed: () => context.push('/search'),
-                          ),
-                          IconButton(
-                            tooltip: 'Notifications',
-                            icon: const Icon(Icons.notifications_none),
-                            onPressed: () => context.push('/notifications'),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-
-                // Filter bar
-                SizedBox(
-                  height: 44,
+      backgroundColor: RippleColors.background,
+      appBar: _buildAppBar(),
+      body: RefreshIndicator(
+        onRefresh: _onRefresh,
+        color: RippleColors.primary,
+        backgroundColor: RippleColors.surface,
+        child: CustomScrollView(
+          controller: _scrollController,
+          slivers: [
+            // Stories bar
+            if (_isLoadingStories)
+              SliverToBoxAdapter(
+                child: SizedBox(
+                  height: 100,
                   child: ListView.builder(
                     scrollDirection: Axis.horizontal,
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    itemCount: _filters.length,
-                    itemBuilder: (context, index) {
-                      final filter = _filters[index];
-                      final isActive = _activeFilter == filter;
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: GestureDetector(
-                          onTap: () => _filterPosts(filter),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                            decoration: BoxDecoration(
-                              color: isActive
-                                  ? BookNestColors.cyan
-                                  : Theme.of(context).colorScheme.surface,
-                              borderRadius: BorderRadius.circular(20),
-                              border: isActive
-                                  ? null
-                                  : Border.all(color: Theme.of(context).dividerColor),
-                            ),
-                            child: Text(
-                              filter,
-                              style: TextStyle(
-                                color: isActive
-                                    ? BookNestColors.navyDeep
-                                    : Theme.of(context).colorScheme.onSurface,
-                                fontSize: 13,
-                                fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
-                              ),
-                            ),
-                          ),
-                        ),
-                      );
-                    },
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    itemCount: 8,
+                    itemBuilder: (context, index) => _buildStorySkeleton(),
                   ),
                 ),
-
-                const SizedBox(height: 8),
-
-                // Posts list
-                Expanded(
-                  child: _isLoading
-                      ? const PostListSkeleton()
-                      : _filteredPosts.isEmpty
-                          ? _buildEmptyState()
-                          : RefreshIndicator(
-                              color: BookNestColors.cyan,
-                              onRefresh: _loadPosts,
-                              child: ListView.builder(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 16, vertical: 8),
-                                itemCount: _filteredPosts.length,
-                                itemBuilder: (context, index) {
-                                  return Entrance(
-                                    index: index,
-                                    child: _PostCard(
-                                      post: _filteredPosts[index],
-                                      onDeleted: () =>
-                                          _removePostLocally(index),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-                ),
-              ],
-            ),
-          ),
-
-          // Stylus FAB with vertical stack
-          Positioned(
-            right: 20,
-            bottom: 100,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                // Post type buttons (vertical stack above stylus)
-                AnimatedOpacity(
-                  opacity: _isStylusOpen ? 1.0 : 0.0,
-                  duration: const Duration(milliseconds: 200),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 300),
-                    curve: Curves.easeOutBack,
-                    height: _isStylusOpen
-                        ? min(_postTypes.length * 64.0,
-                            MediaQuery.sizeOf(context).height * .38)
-                        : 0,
-                    child: SingleChildScrollView(
-                      physics: _isStylusOpen
-                          ? const ClampingScrollPhysics()
-                          : const NeverScrollableScrollPhysics(),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: _postTypes.map((type) {
-                          return _buildPostTypeButton(type);
-                        }).toList(),
+              )
+            else if (_stories.isNotEmpty)
+              SliverToBoxAdapter(child: _buildStoriesBar())
+            else
+              SliverToBoxAdapter(
+                child: SizedBox(
+                  height: 100,
+                  child: Center(
+                    child: Text(
+                      'No stories yet',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: RippleColors.textSecondary,
                       ),
                     ),
                   ),
                 ),
+              ),
 
-                const SizedBox(height: 16),
-
-                // Main stylus button
-                GestureDetector(
-                  onTap: _toggleStylus,
-                  child: AnimatedBuilder(
-                    animation: _stylusRotation,
-                    builder: (context, child) {
-                      return Transform.rotate(
-                        angle: _stylusRotation.value * 3.14159,
-                        child: Container(
-                          width: 58,
-                          height: 58,
-                          decoration: BoxDecoration(
-                            gradient: const LinearGradient(
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                              colors: [BookNestColors.cyanSoft, BookNestColors.cyan],
-                            ),
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                              color: BookNestColors.navyDeep.withOpacity(.25),
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: BookNestColors.cyan.withOpacity(0.35),
-                                blurRadius: 18,
-                                offset: const Offset(0, 5),
-                              ),
-                            ],
+            // Posts feed
+            _posts.isEmpty && !_isLoadingPosts
+                ? SliverFillRemaining(
+                    child: _buildEmptyState(),
+                  )
+                : SliverList(
+                    delegate: SliverChildBuilderDelegate(
+                      (context, index) {
+                        if (index == _posts.length) {
+                          return _isLoadingPosts
+                              ? _buildLoadingPost()
+                              : _hasMorePosts
+                                  ? const SizedBox.shrink()
+                                  : _buildEndOfFeed();
+                        }
+                        return PostCard(
+                          post: _posts[index],
+                          onLike: _onLikePost,
+                          onSave: _onSavePost,
+                          onShare: _onSharePost,
+                          onTap: () => context.go(
+                            '${RippleConstants.routeFeed}/post/${_posts[index]['id']}',
                           ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(4),
-                            child: SvgPicture.asset(
-                              'assets/logo/stylus_polished.svg',
-                              fit: BoxFit.contain,
-                            ),
-                          ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                      childCount: _posts.length + (_hasMorePosts ? 1 : 0),
+                    ),
                   ),
-                ),
-              ],
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
-  Widget _buildPostTypeButton(_PostType type) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    return GestureDetector(
-      onTap: () => _onPostTypeTap(type),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(20),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-          child: Container(
-            margin: const EdgeInsets.only(bottom: 12),
-            padding:
-                const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            decoration: BoxDecoration(
-              color: (dark
-                      ? BookNestColors.darkChatBackground
-                      : Colors.white)
-                  .withOpacity(.55),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                  color: BookNestColors.cyan.withOpacity(.24)),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(type.icon, color: type.color, size: 20),
-                const SizedBox(width: 8),
-                Text(
-                  type.label,
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurface,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
+  PreferredSizeWidget _buildAppBar() {
+    return AppBar(
+      title: ShaderMask(
+        shaderCallback: (bounds) => LinearGradient(
+          colors: RippleColors.brandGradient,
+        ).createShader(bounds),
+        child: const Text(
+          RippleConstants.appName,
+          style: TextStyle(
+            fontFamily: 'Billabong',
+            fontSize: 28,
+            fontWeight: FontWeight.w400,
+            color: Colors.white,
+            letterSpacing: 0.5,
           ),
         ),
+      ),
+      actions: [
+        IconButton(
+          icon: SvgPicture.asset(
+            'assets/icons/heart.svg',
+            width: 28,
+            height: 28,
+          ),
+          onPressed: () {
+            // TODO: Navigate to activity/likes screen
+          },
+        ),
+        IconButton(
+          icon: SvgPicture.asset(
+            'assets/icons/send.svg',
+            width: 28,
+            height: 28,
+          ),
+          onPressed: () => context.go(RippleConstants.routeDms),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStoriesBar() {
+    return SizedBox(
+      height: 100,
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        itemCount: _stories.length + 1, // +1 for "Add Story"
+        itemBuilder: (context, index) {
+          if (index == 0) {
+            return _buildAddStoryButton();
+          }
+          final story = _stories[index - 1];
+          final profile = story['profiles'] as Map<String, dynamic>?;
+          return StoryRing(
+            username: profile?['username'] ?? 'Unknown',
+            displayName: profile?['display_name'] ?? 'Unknown',
+            avatarUrl: profile?['avatar_url'],
+            hasStory: true,
+            isOwnStory: profile?['id'] == SupabaseService().currentUser?.id,
+            onTap: () {
+              // TODO: Navigate to story viewer
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildAddStoryButton() {
+    final currentUser = SupabaseService().currentUser;
+    final profile = currentUser != null
+        ? SupabaseService().getProfile(currentUser.id)
+        : null;
+
+    return FutureBuilder<Map<String, dynamic>?>(
+      future: profile,
+      builder: (context, snapshot) {
+        final avatarUrl = snapshot.data?['avatar_url'];
+        return StoryRing(
+          username: 'Your Story',
+          displayName: snapshot.data?['display_name'] ?? 'You',
+          avatarUrl: avatarUrl,
+          hasStory: false,
+          isAddButton: true,
+          onTap: () => context.go(RippleConstants.routeCreateStory),
+        );
+      },
+    );
+  }
+
+  Widget _buildStorySkeleton() {
+    return Container(
+      width: 68,
+      margin: const EdgeInsets.symmetric(horizontal: 6),
+      child: Column(
+        children: [
+          Container(
+            width: 68,
+            height: 68,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: RippleColors.surfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Container(
+            height: 12,
+            decoration: BoxDecoration(
+              color: RippleColors.surfaceVariant,
+              borderRadius: BorderRadius.circular(6),
+            ),
+          ),
+        ],
       ),
     );
   }
 
   Widget _buildEmptyState() {
-    return EmptyState(
-      icon: Icons.feed_outlined,
-      title: 'No posts yet',
-      subtitle: 'Tap the stylus to share a quote, news, a poll or an event — '
-          'or open the editor to start a book.',
-    );
-  }
-
-  @override
-  void dispose() {
-    _stylusController.dispose();
-    super.dispose();
-  }
-}
-
-// Post type configuration
-class _PostType {
-  final String label;
-  final IconData icon;
-  final Color color;
-
-  const _PostType({
-    required this.label,
-    required this.icon,
-    required this.color,
-  });
-}
-
-// Stylus custom painter (matches your image, tilted)
-class _PostCard extends StatelessWidget {
-  final dynamic post;
-  final VoidCallback? onDeleted;
-
-  const _PostCard({required this.post, this.onDeleted});
-
-  @override
-  Widget build(BuildContext context) {
-    final type = post['type'] ?? 'text';
-    final author = post['profiles']?['username'] ?? 'Unknown';
-
-    switch (type) {
-      case 'quote':
-        return _QuotePostCard(post: post, author: author, onDeleted: onDeleted);
-      case 'news':
-        return _NewsPostCard(post: post, author: author, onDeleted: onDeleted);
-      case 'poll':
-        return _PollPostCard(post: post, author: author, onDeleted: onDeleted);
-      case 'event':
-        return _EventPostCard(post: post, author: author, onDeleted: onDeleted);
-      case 'article':
-        return _ArticlePostCard(post: post, author: author, onDeleted: onDeleted);
-      default:
-        return _DefaultPostCard(post: post, author: author, onDeleted: onDeleted);
-    }
-  }
-}
-
-// Quote post: "Content" — Author
-class _QuotePostCard extends StatelessWidget {
-  final dynamic post;
-  final VoidCallback? onDeleted;
-  final String author;
-
-  const _QuotePostCard({required this.post, required this.author, this.onDeleted});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Theme.of(context).dividerColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Type badge
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: BookNestColors.cyan.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: const Text(
-              'QUOTE',
-              style: TextStyle(
-                color: BookNestColors.cyan,
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 1,
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                color: RippleColors.surfaceVariant,
+                shape: BoxShape.circle,
+              ),
+              child: SvgPicture.asset(
+                'assets/icons/photo_library.svg',
+                width: 40,
+                height: 40,
+                colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
               ),
             ),
-          ),
-          const SizedBox(height: 16),
-
-          // Quote content with quotation marks
-          Text(
-            '"${post['content'] ?? ''}"',
-            style: TextStyle(
-              color: Theme.of(context).colorScheme.onSurface,
-              fontSize: 18,
-              fontStyle: FontStyle.italic,
-              height: 1.5,
+            const SizedBox(height: 24),
+            Text(
+              'No posts yet',
+              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                color: RippleColors.textPrimary,
+              ),
             ),
-          ),
-          const SizedBox(height: 16),
-
-          // Author attribution
-          Row(
-            children: [
-              Container(
-                width: 3,
-                height: 20,
-                decoration: BoxDecoration(
-                  color: BookNestColors.cyan,
-                  borderRadius: BorderRadius.circular(2),
-                ),
+            const SizedBox(height: 8),
+            Text(
+              'Follow people to see their posts here',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: RippleColors.textSecondary,
               ),
-              const SizedBox(width: 10),
-              Text(
-                '— ${post['metadata']?['quote_author'] ?? author}',
-                style: const TextStyle(
-                  color: BookNestColors.lightTextSecondary,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-          if (post['metadata']?['date'] != null) ...[
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                const Icon(Icons.event_outlined,
-                    size: 14, color: BookNestColors.cyan),
-                const SizedBox(width: 6),
-                Text(
-                  post['metadata']['date'].toString(),
-                  style: const TextStyle(
-                    color: BookNestColors.lightTextSecondary,
-                    fontSize: 12.5,
-                  ),
-                ),
-              ],
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: () => context.go(RippleConstants.routeExplore),
+              icon: SvgPicture.asset('assets/icons/search.svg', width: 20, height: 20),
+              label: const Text('Explore People'),
             ),
           ],
-          const SizedBox(height: 12),
-
-          // Footer
-          Row(
-            children: [
-              CircleAvatar(
-                radius: 14,
-                backgroundColor: BookNestColors.navy,
-                child: Text(
-                  author[0].toUpperCase(),
-                  style: const TextStyle(
-                    color: BookNestColors.cyan,
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              // Flexible so long names shrink to "…" instead of shoving
-              // the action bar off the card.
-              Expanded(
-                child: Text(
-                  author,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: BookNestColors.lightTextSecondary,
-                    fontSize: 12,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 4),
-              _PostActionButtons(post: post),
-            ],
-          ),
-        ],
+        ),
       ),
     );
   }
-}
 
-// News post
-class _NewsPostCard extends StatelessWidget {
-  final dynamic post;
-  final VoidCallback? onDeleted;
-  final String author;
-
-  const _NewsPostCard({required this.post, required this.author, this.onDeleted});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Theme.of(context).dividerColor),
-      ),
+  Widget _buildLoadingPost() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (post['metadata']?['image_url'] != null)
-            ClipRRect(
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-              child: CachedNetworkImage(
-                imageUrl: post['metadata']['image_url'],
-                width: double.infinity,
-                height: 180,
-                fit: BoxFit.cover,
-              ),
-            ),
+          // Header skeleton
           Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(
               children: [
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  width: 32,
+                  height: 32,
                   decoration: BoxDecoration(
-                    color: BookNestColors.navy.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Text(
-                    'NEWS',
-                    style: TextStyle(
-                      color: BookNestColors.navy,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 1,
-                    ),
+                    color: RippleColors.surfaceVariant,
+                    shape: BoxShape.circle,
                   ),
                 ),
-                const SizedBox(height: 12),
-                Text(
-                  post['title'] ?? 'Untitled',
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurface,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                ExpandableText(
-                  post['content'] ?? '',
-                  collapsedLines: 3,
-                  style: const TextStyle(
-                    color: BookNestColors.lightTextSecondary,
-                    fontSize: 14,
-                    height: 1.5,
-                  ),
-                ),
-                LinkPreviewCard(content: post['content']?.toString() ?? ''),
-                const SizedBox(height: 12),
-                Row(
+                const SizedBox(width: 12),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: Text(
-                        'By $author',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: BookNestColors.lightTextSecondary,
-                          fontSize: 12,
-                        ),
+                    Container(
+                      width: 100,
+                      height: 14,
+                      decoration: BoxDecoration(
+                        color: RippleColors.surfaceVariant,
+                        borderRadius: BorderRadius.circular(4),
                       ),
                     ),
-                    const SizedBox(width: 6),
-                    const Icon(Icons.arrow_forward, color: BookNestColors.cyan, size: 16),
+                    const SizedBox(height: 4),
+                    Container(
+                      width: 60,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: RippleColors.surfaceVariant,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
                   ],
                 ),
               ],
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-            child: Row(
-              children: [
-                const Spacer(),
-                _PostActionButtons(
-                    post: post, onDeleted: onDeleted),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// Poll post
-class _PollPostCard extends StatelessWidget {
-  final dynamic post;
-  final VoidCallback? onDeleted;
-  final String author;
-
-  const _PollPostCard({required this.post, required this.author, this.onDeleted});
-
-  @override
-  Widget build(BuildContext context) {
-    final options = post['metadata']?['options'] ?? ['Yes', 'No'];
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Theme.of(context).dividerColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+          // Image skeleton
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: BookNestColors.cyan.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: const Text(
-              'POLL',
-              style: TextStyle(
-                color: BookNestColors.cyan,
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 1,
-              ),
-            ),
+            color: RippleColors.surfaceVariant,
+            height: MediaQuery.of(context).size.width,
           ),
-          const SizedBox(height: 12),
-          Text(
-            post['content'] ?? 'Poll question?',
-            style: TextStyle(
-              color: Theme.of(context).colorScheme.onSurface,
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 16),
-          ...options.map<Widget>((option) {
-            return Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-              decoration: BoxDecoration(
-                color: BookNestColors.navy,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Theme.of(context).dividerColor),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 20,
-                    height: 20,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: BookNestColors.lightTextSecondary),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Text(
-                    option,
-                    style: TextStyle(color: Theme.of(context).colorScheme.onSurface, fontSize: 14),
-                  ),
-                ],
-              ),
-            );
-          }).toList(),
-          const SizedBox(height: 8),
-          Text(
-            '$author • ${post['metadata']?['votes'] ?? 0} votes',
-            style: const TextStyle(
-              color: BookNestColors.lightTextSecondary,
-              fontSize: 12,
-            ),
-          ),
+          // Actions skeleton
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+            padding: const EdgeInsets.all(16),
             child: Row(
-              children: [
-                const Spacer(),
-                _PostActionButtons(
-                    post: post, onDeleted: onDeleted),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// Event post
-class _EventPostCard extends StatelessWidget {
-  final dynamic post;
-  final VoidCallback? onDeleted;
-  final String author;
-
-  const _EventPostCard({required this.post, required this.author, this.onDeleted});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Theme.of(context).dividerColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: BookNestColors.navy.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: const Text(
-              'EVENT',
-              style: TextStyle(
-                color: BookNestColors.navy,
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 1,
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            post['title'] ?? 'Event',
-            style: TextStyle(
-              color: Theme.of(context).colorScheme.onSurface,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              const Icon(Icons.calendar_today, color: BookNestColors.cyan, size: 16),
-              const SizedBox(width: 8),
-              Text(
-                post['metadata']?['date'] ?? 'TBD',
-                style: const TextStyle(color: BookNestColors.lightTextSecondary, fontSize: 14),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              const Icon(Icons.location_on, color: BookNestColors.cyan, size: 16),
-              const SizedBox(width: 8),
-              Text(
-                post['metadata']?['location'] ?? 'Online',
-                style: const TextStyle(color: BookNestColors.lightTextSecondary, fontSize: 14),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: () => _showEventDetails(context, post),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: BookNestColors.cyan,
-                foregroundColor: BookNestColors.navyDeep,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-              ),
-              child: const Text('RSVP'),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-            child: Row(
-              children: [
-                const Spacer(),
-                _PostActionButtons(
-                    post: post, onDeleted: onDeleted),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// Article post
-class _ArticlePostCard extends StatelessWidget {
-  final dynamic post;
-  final VoidCallback? onDeleted;
-  final String author;
-
-  const _ArticlePostCard({required this.post, required this.author, this.onDeleted});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Theme.of(context).dividerColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: BookNestColors.navy.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: const Text(
-              'ARTICLE',
-              style: TextStyle(
-                color: BookNestColors.navy,
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 1,
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            post['title'] ?? 'Untitled Article',
-            style: TextStyle(
-              color: Theme.of(context).colorScheme.onSurface,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 8),
-          ExpandableText(
-            post['content'] ?? '',
-            collapsedLines: 4,
-            style: const TextStyle(
-              color: BookNestColors.lightTextSecondary,
-              fontSize: 14,
-              height: 1.5,
-            ),
-          ),
-          LinkPreviewCard(content: post['content']?.toString() ?? ''),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'By $author',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: BookNestColors.lightTextSecondary,
-                    fontSize: 12,
+              children: List.generate(4, (index) => Expanded(
+                child: Container(
+                  height: 24,
+                  decoration: BoxDecoration(
+                    color: RippleColors.surfaceVariant,
+                    borderRadius: BorderRadius.circular(12),
                   ),
                 ),
-              ),
-              const SizedBox(width: 6),
-              TextButton(
-                onPressed: () => context.push('/publish-details?bookId=${post['id']}'),
-                child: const Text(
-                  'Read',
-                  style: TextStyle(color: BookNestColors.cyan),
-                ),
-              ),
-            ],
+              )),
+            ),
           ),
+          // Caption skeleton
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-            child: Row(
-              children: [
-                const Spacer(),
-                _PostActionButtons(
-                    post: post, onDeleted: onDeleted),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// Default fallback post
-class _DefaultPostCard extends StatelessWidget {
-  final dynamic post;
-  final VoidCallback? onDeleted;
-  final String author;
-
-  const _DefaultPostCard({required this.post, required this.author, this.onDeleted});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Theme.of(context).dividerColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ExpandableText(
-            post['content'] ?? '',
-            collapsedLines: 5,
-            style: TextStyle(color: Theme.of(context).colorScheme.onSurface, height: 1.45),
-          ),
-          LinkPreviewCard(content: post['content']?.toString() ?? ''),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-            child: Row(
-              children: [
-                const Spacer(),
-                _PostActionButtons(
-                    post: post, onDeleted: onDeleted),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Like (optimistic, local until posts sync to the cloud) + real share sheet.
-class _PostActionButtons extends StatefulWidget {
-  final dynamic post;
-  final VoidCallback? onDeleted;
-  const _PostActionButtons({required this.post, this.onDeleted});
-
-  @override
-  State<_PostActionButtons> createState() => _PostActionButtonsState();
-}
-
-class _PostActionButtonsState extends State<_PostActionButtons> {
-  late bool _liked = widget.post is Map && widget.post['liked_by_me'] == true;
-  late int _count = widget.post is Map
-      ? ((widget.post['like_count'] as num?)?.toInt() ?? 0)
-      : 0;
-  bool _busy = false;
-
-  Future<void> _toggle() async {
-    if (_busy) return;
-    final post = widget.post;
-    final id =
-        post is Map && post['id'] != null ? post['id'].toString() : null;
-    final target = !_liked;
-    HapticFeedback.lightImpact();
-    setState(() {
-      _liked = target;
-      _count = target ? _count + 1 : (_count > 0 ? _count - 1 : 0);
-    });
-    if (id == null) return; // post not synced yet — local-only like
-    _busy = true;
-    try {
-      final fresh = await SupabaseService().setFeedLike(id, liked: target);
-      if (mounted) setState(() => _count = fresh);
-    } catch (error) {
-      if (mounted) {
-        setState(() {
-          _liked = !target;
-          _count = target ? (_count > 0 ? _count - 1 : 0) : _count + 1;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(error is WriteException
-                ? error.message
-                : "BookNest couldn't complete that just now — please try "
-                    "again in a moment."),
-          ),
-        );
-      }
-    } finally {
-      _busy = false;
-    }
-  }
-
-  bool get _mine =>
-      widget.post is Map &&
-      widget.post['created_by']?.toString() ==
-          (SupabaseService().auth.currentUser?.id ?? '');
-
-  Future<void> _deleteMyPost() async {
-    final id = widget.post is Map && widget.post['id'] != null
-        ? widget.post['id'].toString()
-        : null;
-    if (id == null) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Delete this post?'),
-        content: const Text(
-            'It disappears for every reader, along with its comments, likes '
-            'and reshares. This cannot be undone.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancel')),
-          TextButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Delete',
-                  style: TextStyle(
-                      color: Color(0xFFD06A6A),
-                      fontWeight: FontWeight.bold))),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    final res = await BackendApi.instance
-        .call('posts.delete', {'postId': id});
-    if (!mounted) return;
-    if (res == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text(
-              'The post could not be deleted — please try again.')));
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Post deleted.')));
-    widget.onDeleted?.call();
-  }
-
-  late int _views = widget.post is Map
-      ? ((widget.post['view_count'] as num?)?.toInt() ?? 0)
-      : 0;
-  late int _comments = widget.post is Map
-      ? ((widget.post['comment_count'] as num?)?.toInt() ?? 0)
-      : 0;
-  late int _reshares = widget.post is Map
-      ? ((widget.post['reshare_count'] as num?)?.toInt() ?? 0)
-      : 0;
-
-  void _openComments() {
-    final id = widget.post is Map && widget.post['id'] != null
-        ? widget.post['id'].toString()
-        : null;
-    if (id == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('This post is still on this device — comments open '
-              'once it syncs to the cloud.')));
-      return;
-    }
-    showPostComments(context, postId: id, initialCount: _comments)
-        .then((count) {
-      if (count != null && mounted) setState(() => _comments = count);
-    });
-  }
-
-  Future<void> _reshare() async {
-    final id = widget.post is Map && widget.post['id'] != null
-        ? widget.post['id'].toString()
-        : null;
-    if (id == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('This post is still on this device — reshares open '
-              'once it syncs to the cloud.')));
-      return;
-    }
-    HapticFeedback.lightImpact();
-    final res = await BackendApi.instance.call('posts.reshare',
-        {'postId': id});
-    if (!mounted) return;
-    if (res == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Could not reshare — please try again.')));
-      return;
-    }
-    final already = res['already'] == true;
-    final total = (res['reshareCount'] as num?)?.toInt();
-    setState(() {
-      if (already && _reshares > 0) _reshares -= 1;
-      if (!already) _reshares += 1;
-      if (total != null) _reshares = total;
-    });
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(already
-            ? 'You already shared this — taken back.'
-            : 'Shared with your followers 🎉')));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final muted = Theme.of(context).hintColor;
-    // Wrap, not Row: on narrow phones the bar reflows to a second line
-    // instead of spilling past the card edge.
-    return Wrap(
-      alignment: WrapAlignment.end,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        Icon(Icons.visibility_outlined, color: muted.withOpacity(.8), size: 18),
-        const SizedBox(width: 4),
-        AnimatedCount(
-          value: _views,
-          style: TextStyle(color: muted, fontSize: 12.5),
-        ),
-        const SizedBox(width: 8),
-        IconButton(
-          icon: Icon(
-            _liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
-            color: _liked ? BookNestColors.cyan : muted,
-            size: 20,
-          ),
-          tooltip: _liked ? 'Unlike' : 'Like',
-          visualDensity: VisualDensity.compact,
-          padding: const EdgeInsets.all(4),
-          constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
-          onPressed: _toggle,
-        ),
-        AnimatedCount(
-          value: _count,
-          style: TextStyle(
-            color: _liked ? BookNestColors.cyan : muted,
-            fontSize: 13,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(width: 6),
-        InkWell(
-          borderRadius: BorderRadius.circular(18),
-          onTap: _openComments,
-          child: Padding(
-            padding: const EdgeInsets.all(4),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.mode_comment_outlined, color: muted, size: 19),
-                const SizedBox(width: 4),
-                AnimatedCount(
-                  value: _comments,
-                  style: TextStyle(color: muted, fontSize: 12.5),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: List.generate(3, (index) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Container(
+                  width: double.infinity,
+                  height: 14,
+                  decoration: BoxDecoration(
+                    color: RippleColors.surfaceVariant,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
                 ),
-              ],
+              )),
             ),
           ),
-        ),
-        const SizedBox(width: 6),
-        InkWell(
-          borderRadius: BorderRadius.circular(18),
-          onTap: _reshare,
-          child: Padding(
-            padding: const EdgeInsets.all(4),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.repeat_rounded,
-                    color: muted, size: 19),
-                const SizedBox(width: 4),
-                AnimatedCount(
-                  value: _reshares,
-                  style: TextStyle(color: muted, fontSize: 12.5),
-                ),
-              ],
-            ),
-          ),
-        ),
-        if (_mine)
-          IconButton(
-            icon: Icon(Icons.delete_outline_rounded,
-                color: muted.withOpacity(.7), size: 18),
-            tooltip: 'Delete post',
-            visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.all(4),
-            constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
-            onPressed: _deleteMyPost,
-          )
-        else
-          IconButton(
-            icon: Icon(Icons.flag_outlined,
-                color: muted.withOpacity(.7), size: 18),
-            tooltip: 'Report post',
-          visualDensity: VisualDensity.compact,
-          padding: const EdgeInsets.all(4),
-          constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
-          onPressed: () {
-            final id = widget.post is Map && widget.post['id'] != null
-                ? widget.post['id'].toString()
-                : null;
-            if (id == null) return;
-            showReportSheet(context,
-                kind: ReportTargetKind.post, targetId: id);
-          },
-        ),
-      ],
+        ],
+      ),
     );
   }
-}
 
-/// The post comments sheet: read, write, count flows back to the card.
-Future<int?> showPostComments(
-  BuildContext context, {
-  required String postId,
-  required int initialCount,
-}) {
-  return showModalBottomSheet<int>(
-    context: context,
-    isScrollControlled: true,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-    ),
-    builder: (sheetContext) => _PostCommentsSheet(
-      postId: postId,
-      initialCount: initialCount,
-    ),
-  );
-}
-
-class _PostCommentsSheet extends StatefulWidget {
-  final String postId;
-  final int initialCount;
-  const _PostCommentsSheet(
-      {required this.postId, required this.initialCount});
-  @override
-  State<_PostCommentsSheet> createState() => _PostCommentsSheetState();
-}
-
-/// Comments live as threads: top-level posts with expandable reply
-/// threads one level deep (Telegram/Reddit hybrid — replies always attach
-/// to their thread root and carry a "replying to" badge when needed).
-class _PostCommentsSheetState extends State<_PostCommentsSheet> {
-  List<Map<String, dynamic>> _comments = [];
-  bool _loading = true;
-  bool _sending = false;
-  final _input = TextEditingController();
-  Map<String, dynamic>? _replyTarget;
-  final Set<String> _expanded = {};
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  @override
-  void dispose() {
-    _input.dispose();
-    super.dispose();
-  }
-
-  Future<void> _load() async {
-    final res = await BackendApi.instance
-        .call('posts.comments.list', {'postId': widget.postId});
-    if (!mounted) return;
-    setState(() {
-      _comments = ((res?['comments'] as List?) ?? const [])
-          .map((row) => Map<String, dynamic>.from(row as Map))
-          .toList();
-      _loading = false;
-    });
-  }
-
-  String _nameOf(Map<String, dynamic> c) {
-    if (c['mine'] == true) return 'You';
-    final profile = c['profile'];
-    if (profile is Map) {
-      final profileMap = Map<String, dynamic>.from(profile);
-      return (profileMap['username']?.toString().isNotEmpty ?? false)
-          ? profileMap['username'].toString()
-          : (profileMap['display_name']?.toString().isNotEmpty ?? false
-              ? profileMap['display_name'].toString()
-              : 'Reader');
-    }
-    return 'Reader';
-  }
-
-  List<Map<String, dynamic>> get _roots => _comments
-      .where((c) =>
-          c['parentId'] == null || c['parentId'].toString().isEmpty)
-      .toList();
-
-  List<Map<String, dynamic>> _repliesOf(String rootId) => _comments
-      .where((c) => c['parentId'].toString() == rootId)
-      .toList();
-
-  Future<void> _send() async {
-    final text = _input.text.trim();
-    if (text.isEmpty || _sending) return;
-    setState(() => _sending = true);
-    final target = _replyTarget;
-    final res = await BackendApi.instance.call('posts.comments.create', {
-      'postId': widget.postId,
-      'text': text,
-      if (target != null) 'parentId': target['id']?.toString() ?? '',
-    });
-    if (!mounted) return;
-    setState(() => _sending = false);
-    if (res == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content:
-              Text('The comment could not be posted — please try again.')));
-      return;
-    }
-    _input.clear();
-    final comment = res['comment'] is Map
-        ? Map<String, dynamic>.from(res['comment'] as Map)
-        : <String, dynamic>{
-            'text': text,
-            'createdAt': DateTime.now().toIso8601String(),
-            'mine': true,
-            if (target != null)
-              'parentId': target['parentId']?.toString().isNotEmpty == true
-                  ? target['parentId'].toString()
-                  : target['id'].toString(),
-            if (target != null) 'replyToName': _nameOf(target),
-          };
-    setState(() {
-      _comments = [..._comments, comment];
-      if (comment['parentId']?.toString().isNotEmpty ?? false) {
-        _expanded.add(comment['parentId'].toString());
-      }
-      _replyTarget = null;
-    });
-    // Silent re-sync so counts and ordering stay server-truth.
-    unawaited(_load());
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    final roots = _roots;
+  Widget _buildEndOfFeed() {
     return Padding(
-      padding:
-          EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
-      child: SizedBox(
-        height: MediaQuery.sizeOf(context).height * .74,
-        child: Column(
-          children: [
-            const SizedBox(height: 10),
-            Container(
-              width: 44,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Theme.of(context).hintColor.withOpacity(.4),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text('Conversation',
-                style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: Theme.of(context).colorScheme.onSurface)),
-            Expanded(
-              child: _loading
-                  ? const RowsSkeleton(count: 6)
-                  : roots.isEmpty
-                      ? Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.mode_comment_outlined,
-                                  size: 34,
-                                  color: Theme.of(context)
-                                      .hintColor
-                                      .withOpacity(.5)),
-                              const SizedBox(height: 10),
-                              Text(
-                                'Start the thread — say something first',
-                                style: TextStyle(
-                                    color: Theme.of(context).hintColor),
-                              ),
-                            ],
-                          ),
-                        )
-                      : RefreshIndicator(
-                          color: BookNestColors.cyan,
-                          onRefresh: _load,
-                          child: ListView.builder(
-                            padding:
-                                const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                            itemCount: roots.length,
-                            itemBuilder: (context, i) {
-                              final root = roots[i];
-                              final replies = _repliesOf(
-                                  root['id']?.toString() ?? '');
-                              final expanded = _expanded.contains(
-                                  root['id']?.toString() ?? '');
-                              return _ThreadTile(
-                                comment: root,
-                                dark: dark,
-                                onReply: () => setState(
-                                    () => _replyTarget = root),
-                                replies: expanded ? replies : const [],
-                                replyCount: replies.length,
-                                expanded: expanded,
-                                onToggle: replies.isEmpty
-                                    ? null
-                                    : () => setState(() {
-                                          final id =
-                                              root['id'].toString();
-                                          expanded
-                                              ? _expanded.remove(id)
-                                              : _expanded.add(id);
-                                        }),
-                                onReplyReply: (reply) => setState(
-                                    () => _replyTarget = reply),
-                              );
-                            },
-                          ),
-                        ),
-            ),
-            if (_replyTarget != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 4, 14, 0),
-                child: Row(
-                  children: [
-                    Icon(Icons.subdirectory_arrow_right_rounded,
-                        size: 15,
-                        color: BookNestColors.cyan.withOpacity(.9)),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        'Replying to ${_nameOf(_replyTarget!)}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontSize: 12, fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                    GestureDetector(
-                      onTap: () =>
-                          setState(() => _replyTarget = null),
-                      child: Icon(Icons.close_rounded,
-                          size: 16,
-                          color:
-                              Theme.of(context).colorScheme.onSurface
-                                  .withOpacity(.6)),
-                    ),
-                  ],
-                ),
-              ),
-            SafeArea(
-              top: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(14, 6, 14, 12),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _input,
-                        minLines: 1,
-                        maxLines: 4,
-                        textCapitalization: TextCapitalization.sentences,
-                        decoration: InputDecoration(
-                          hintText: _replyTarget != null
-                              ? 'Add a reply…'
-                              : 'Add a comment…',
-                          suffixIcon: _sending
-                              ? const Padding(
-                                  padding: EdgeInsets.all(12),
-                                  child: SizedBox(
-                                      width: 18,
-                                      height: 18,
-                                      child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: BookNestColors.cyan)),
-                                )
-                              : null,
-                        ),
-                        onSubmitted: (_) => _send(),
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: _sending ? null : _send,
-                      icon: const Icon(Icons.send_rounded,
-                          color: BookNestColors.cyan),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// One root comment with its (optional) expanded reply thread beneath.
-class _ThreadTile extends StatelessWidget {
-  const _ThreadTile({
-    required this.comment,
-    required this.dark,
-    required this.onReply,
-    required this.replies,
-    required this.replyCount,
-    required this.expanded,
-    required this.onToggle,
-    required this.onReplyReply,
-  });
-
-  final Map<String, dynamic> comment;
-  final bool dark;
-  final VoidCallback onReply;
-  final List<Map<String, dynamic>> replies;
-  final int replyCount;
-  final bool expanded;
-  final VoidCallback? onToggle;
-  final ValueChanged<Map<String, dynamic>> onReplyReply;
-
-  String get _name {
-    if (comment['mine'] == true) return 'You';
-    final profile = comment['profile'];
-    if (profile is Map) {
-      final m = Map<String, dynamic>.from(profile);
-      return (m['username']?.toString().isNotEmpty ?? false)
-          ? m['username'].toString()
-          : (m['display_name']?.toString().isNotEmpty ?? false
-              ? m['display_name'].toString()
-              : 'Reader');
-    }
-    return 'Reader';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
-        color: dark
-            ? Colors.white.withOpacity(.05)
-            : BookNestColors.navyDeep.withOpacity(.04),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _CommentRow(comment: comment, name: _name, onReply: onReply),
-          if (replyCount > 0 && !expanded)
-            Padding(
-              padding: const EdgeInsets.only(top: 6, left: 34),
-              child: GestureDetector(
-                onTap: onToggle,
-                child: Text(
-                  'View $replyCount ${replyCount == 1 ? 'reply' : 'replies'}',
-                  style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: BookNestColors.cyan),
-                ),
-              ),
-            ),
-          if (expanded) ...[
-            if (replyCount > 0)
-              Padding(
-                padding: const EdgeInsets.only(top: 4, left: 34, bottom: 2),
-                child: GestureDetector(
-                  onTap: onToggle,
-                  child: Text('Hide replies',
-                      style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w700,
-                          color: Theme.of(context)
-                              .colorScheme
-                              .onSurface
-                              .withOpacity(.5))),
-                ),
-              ),
-            for (final reply in replies)
-              Padding(
-                padding: const EdgeInsets.only(top: 8, left: 34),
-                child: _CommentRow(
-                  comment: reply,
-                  name: (reply['mine'] == true
-                      ? 'You'
-                      : ((reply['profile'] is Map &&
-                              (Map<String,
-                                              dynamic>.from(
-                                                  reply['profile'] as Map)
-                                          ['username']?.toString() ??
-                                      '')
-                                  .isNotEmpty)
-                          ? Map<String, dynamic>.from(
-                                  reply['profile'] as Map)['username']
-                              .toString()
-                          : 'Reader')),
-                  onReply: () => onReplyReply(reply),
-                  replyBadge: reply['replyToName']?.toString(),
-                ),
-              ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _CommentRow extends StatelessWidget {
-  const _CommentRow({
-    required this.comment,
-    required this.name,
-    required this.onReply,
-    this.replyBadge,
-  });
-
-  final Map<String, dynamic> comment;
-  final String name;
-  final VoidCallback onReply;
-  final String? replyBadge;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            CircleAvatar(
-              radius: 11,
-              backgroundColor: BookNestColors.navy,
-              child: Text(name[0].toUpperCase(),
-                  style: const TextStyle(
-                      color: BookNestColors.cyan,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold)),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: 12.5, fontWeight: FontWeight.w700)),
-            ),
-            const SizedBox(width: 6),
-            GestureDetector(
-              onTap: onReply,
-              child: Text('Reply',
-                  style: TextStyle(
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w700,
-                      color: BookNestColors.cyan.withOpacity(.85))),
-            ),
-          ],
-        ),
-        if (replyBadge != null && replyBadge!.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 5, left: 30),
-            child: Text('↩ $replyBadge',
-                style: TextStyle(
-                    fontSize: 11,
-                    fontStyle: FontStyle.italic,
-                    color: Theme.of(context)
-                        .colorScheme
-                        .onSurface
-                        .withOpacity(.55))),
+      padding: const EdgeInsets.all(32),
+      child: Center(
+        child: Text(
+          'You\'re all caught up!',
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+            color: RippleColors.textSecondary,
           ),
-        const SizedBox(height: 6),
-        Text(comment['text']?.toString() ?? '',
-            style: TextStyle(
-                fontSize: 14,
-                height: 1.35,
-                color: Theme.of(context).colorScheme.onSurface)),
-      ],
+        ),
+      ),
     );
   }
-}
-
-/// Real event details dialog fed from the post's metadata.
-void _showEventDetails(BuildContext context, dynamic post) {
-  final metadata = post?['metadata'];
-  showDialog<void>(
-    context: context,
-    builder: (dialogContext) => AlertDialog(
-      backgroundColor: (Theme.of(dialogContext).brightness == Brightness.dark
-              ? BookNestColors.darkChatBackground
-              : Colors.white)
-          .withOpacity(.88),
-      shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(22),
-          side: BorderSide(color: BookNestColors.cyan.withOpacity(.3))),
-      title: Text(post?['title']?.toString() ?? 'Event'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(post?['content']?.toString() ?? '',
-              style: TextStyle(height: 1.4)),
-          const SizedBox(height: 12),
-          Row(children: [
-            const Icon(Icons.calendar_today, size: 15, color: BookNestColors.cyan),
-            const SizedBox(width: 7),
-            Text(metadata?['date']?.toString() ?? 'Date to be announced'),
-          ]),
-          const SizedBox(height: 6),
-          Row(children: [
-            const Icon(Icons.schedule, size: 15, color: BookNestColors.cyan),
-            const SizedBox(width: 7),
-            Text(metadata?['time']?.toString() ?? 'Time to be announced'),
-          ]),
-          const SizedBox(height: 6),
-          Row(children: [
-            const Icon(Icons.location_on_outlined,
-                size: 15, color: BookNestColors.cyan),
-            const SizedBox(width: 7),
-            Expanded(child: Text(metadata?['location']?.toString() ?? 'Location to be announced')),
-          ]),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(dialogContext),
-          child: const Text('Close',
-              style: TextStyle(color: BookNestColors.cyan)),
-        ),
-      ],
-    ),
-  );
 }
