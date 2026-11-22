@@ -58,3 +58,6 @@ backend/secrets.local.env
 supabase/.branches/
 supabase/.temp/
 supabase/.deno/
+
+# Local Supabase config (contains credentials - never commit!)
+lib/config/supabase_config.dart
