@@ -3,7 +3,7 @@
     "short_name": "Ripple",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#000000",
+    "background_color": "#0A0A0A",
     "theme_color": "#FF6B35",
     "description": "Ripple \u2014 Your Visual Social World",
     "orientation": "portrait-primary",
