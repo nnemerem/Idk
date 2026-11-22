@@ -79,17 +79,26 @@ jobs:
       #   run: flutter analyze --no-fatal-infos
       # Temporarily disabled to unblock build
 
+      - name: Build APK (debug)
+        run: flutter build apk --debug
+
       - name: Build APK (release)
         run: flutter build apk --release
-        if: github.event_name != 'pull_request'
+        # Release build may need signing config - try anyway
 
       - name: Build App Bundle (release)
         run: flutter build appbundle --release
-        if: github.event_name != 'pull_request'
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ripple-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 30
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
+        if: always()
         with:
           name: ripple-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
@@ -97,7 +106,7 @@ jobs:
 
       - name: Upload App Bundle
         uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
+        if: always()
         with:
           name: ripple-app-bundle
           path: build/app/outputs/bundle/release/app-release.aab
