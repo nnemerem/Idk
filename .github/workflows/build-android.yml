@@ -67,8 +67,9 @@ jobs:
           ping -c 2 pub.dev || echo "ping failed"
 
       - name: Install dependencies (with output capture)
+        continue-on-error: true
         run: |
-          flutter pub get --verbose 2>&1 | tee pub_get_output.txt
+          flutter pub get 2>&1 | tee pub_get_output.txt
           echo "EXIT_CODE=${PIPESTATUS[0]}" >> pub_get_output.txt
         shell: bash
 
@@ -78,6 +79,11 @@ jobs:
           echo "=== PUB GET OUTPUT ==="
           cat pub_get_output.txt
           echo "=== END OUTPUT ==="
+          EXIT_CODE=$(grep "EXIT_CODE=" pub_get_output.txt | cut -d= -f2)
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::flutter pub get failed with exit code $EXIT_CODE"
+            exit 1
+          fi
 
       - name: Upload pub get logs (debug)
         if: always()
