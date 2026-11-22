@@ -57,8 +57,19 @@ jobs:
       - name: Flutter version
         run: flutter --version
 
-      - name: Install dependencies
-        run: flutter pub get --verbose
+      - name: Install dependencies (with output capture)
+        run: |
+          flutter pub get --verbose 2>&1 | tee pub_get_output.txt
+          echo "EXIT_CODE=${PIPESTATUS[0]}" >> pub_get_output.txt
+        shell: bash
+
+      - name: Upload pub get logs (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pub-get-logs
+          path: pub_get_output.txt
+          retention-days: 7
 
       - name: Verify Flutter analyze
         run: flutter analyze --no-fatal-infos
