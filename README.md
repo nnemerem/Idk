@@ -15,7 +15,7 @@
 
 ### Technical Features
 - 🎨 **Custom Dark Theme** - Unique Amber → Copper → Rose gradient signature
-- 🔐 **Authentication** - Email/password with Supabase Auth
+- 🔐 **Authentication** - Email/password with Supabase Auth (+ Anonymous for Guest Mode)
 - 📡 **Real-time** - Live updates for messages, likes, comments
 - 🖼️ **Media Upload** - Photos, videos, carousels with compression
 - 🎵 **Music Integration** - Add music to Reels and Stories
@@ -45,10 +45,12 @@ lib/
 ├── config/
 │   ├── theme.dart                 # Custom dark theme (Amber → Copper → Rose)
 │   ├── constants.dart             # App constants, routes, DB tables
-│   └── router.dart                # go_router with auth guards + shell nav
+│   ├── router.dart                # go_router with auth guards + shell nav
+│   └── supabase_config.dart       # Supabase credentials (local dev, gitignored)
 ├── core/
 │   └── utils/
-│       └── auth_guard.dart        # Authentication helpers
+│       ├── auth_guard.dart        # Authentication helpers
+│       └── guest_mode.dart        # Guest/anonymous browsing mode
 ├── services/
 │   └── supabase_service.dart      # Supabase wrapper & helpers
 └── presentation/
@@ -88,216 +90,49 @@ lib/
             └── search_screen.dart
 ```
 
-## 🚀 Getting Started
+## 🚀 Quick Start (Local)
 
 ### Prerequisites
-- Flutter SDK 3.22 or newer
+- Flutter SDK 3.22+
 - Dart 3.x
-- A Supabase project (free tier works)
+- Supabase project (free tier works)
 
 ### 1. Clone & Install
 ```bash
-git clone <your-repo-url>
-cd ripple
+git clone https://github.com/nnemerem/Idk.git
+cd Idk
 flutter pub get
 ```
 
-### 2. Configure Supabase
-Update `lib/config/constants.dart` with your Supabase credentials:
-```dart
-static const String supabaseUrl = 'https://your-project.supabase.co';
-static const String supabaseAnonKey = 'your-anon-key';
+### 2. Configure Supabase (Local Development)
+```bash
+# Run the helper script - it will prompt for your credentials
+./scripts/local_dev.sh
+
+# OR manually edit lib/config/supabase_config.dart:
+# static const String supabaseUrl = 'https://your-project.supabase.co';
+# static const String supabaseAnonKey = 'your-anon-key';
 ```
 
-### 3. Create Database Schema
-Run these SQL migrations in your Supabase SQL Editor:
-
-```sql
--- Enable UUID extension
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
--- Profiles table
-CREATE TABLE profiles (
-  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-  username TEXT UNIQUE NOT NULL,
-  display_name TEXT,
-  bio TEXT DEFAULT '',
-  avatar_url TEXT,
-  website TEXT,
-  email TEXT,
-  phone_number TEXT,
-  date_of_birth DATE,
-  gender TEXT,
-  followers_count INT DEFAULT 0,
-  following_count INT DEFAULT 0,
-  posts_count INT DEFAULT 0,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Posts table
-CREATE TABLE posts (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  caption TEXT,
-  location TEXT,
-  media JSONB NOT NULL DEFAULT '[]',
-  post_type TEXT CHECK (post_type IN ('image', 'video', 'carousel')),
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Reels table
-CREATE TABLE reels (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  caption TEXT,
-  video_url TEXT NOT NULL,
-  thumbnail_url TEXT,
-  music_title TEXT,
-  music_artist TEXT,
-  duration_seconds INT DEFAULT 0,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Stories table
-CREATE TABLE stories (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  media_url TEXT,
-  thumbnail_url TEXT,
-  media_type TEXT CHECK (media_type IN ('image', 'video')),
-  caption TEXT,
-  background_color TEXT,
-  elements JSONB DEFAULT '[]',
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Follows table
-CREATE TABLE follows (
-  follower_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  following_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (follower_id, following_id)
-);
-
--- Likes tables
-CREATE TABLE post_likes (
-  post_id UUID REFERENCES posts(id) ON DELETE CASCADE,
-  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (post_id, user_id)
-);
-
-CREATE TABLE reel_likes (
-  reel_id UUID REFERENCES reels(id) ON DELETE CASCADE,
-  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (reel_id, user_id)
-);
-
--- Comments tables
-CREATE TABLE post_comments (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  post_id UUID REFERENCES posts(id) ON DELETE CASCADE,
-  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  content TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE reel_comments (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  reel_id UUID REFERENCES reels(id) ON DELETE CASCADE,
-  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  content TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Saved posts
-CREATE TABLE saved_posts (
-  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  post_id UUID REFERENCES posts(id) ON DELETE CASCADE,
-  reel_id UUID REFERENCES reels(id) ON DELETE CASCADE,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (user_id, post_id, reel_id)
-);
-
--- Conversations & Messages
-CREATE TABLE conversations (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE conversation_participants (
-  conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
-  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (conversation_id, user_id)
-);
-
-CREATE TABLE messages (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
-  sender_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  content TEXT,
-  media_url TEXT,
-  media_type TEXT CHECK (media_type IN ('image', 'video')),
-  message_type TEXT DEFAULT 'text' CHECK (message_type IN ('text', 'image', 'video')),
-  is_read BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Notifications
-CREATE TABLE notifications (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-  type TEXT NOT NULL,
-  title TEXT,
-  body TEXT,
-  data JSONB,
-  is_read BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Enable Row Level Security
-ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE reels ENABLE ROW LEVEL SECURITY;
-ALTER TABLE stories ENABLE ROW LEVEL SECURITY;
-ALTER TABLE follows ENABLE ROW LEVEL SECURITY;
-ALTER TABLE post_likes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE reel_likes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE post_comments ENABLE ROW LEVEL SECURITY;
-ALTER TABLE reel_comments ENABLE ROW LEVEL SECURITY;
-ALTER TABLE saved_posts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE conversation_participants ENABLE ROW LEVEL SECURITY;
-ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
-ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
-
--- Basic RLS Policies (customize as needed)
-CREATE POLICY "Public profiles are viewable by everyone" ON profiles FOR SELECT USING (true);
-CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (auth.uid() = id);
-CREATE POLICY "Posts are viewable by everyone" ON posts FOR SELECT USING (true);
-CREATE POLICY "Users can insert own posts" ON posts FOR INSERT WITH CHECK (auth.uid() = user_id);
-CREATE POLICY "Users can update own posts" ON posts FOR UPDATE USING (auth.uid() = user_id);
-CREATE POLICY "Users can delete own posts" ON posts FOR DELETE USING (auth.uid() = user_id);
-
--- Storage buckets (create in Supabase Dashboard)
--- avatars, posts, reels, stories
+### 3. Run Database Migrations
+In Supabase Dashboard → **SQL Editor**, run the migration:
+```bash
+# Option A: Copy/paste from supabase/migrations/20240101000000_initial_schema.sql
+# Option B: If using Supabase CLI
+supabase db push
 ```
 
 ### 4. Create Storage Buckets
-In Supabase Dashboard → Storage, create these buckets:
-- `avatars` (public)
-- `posts` (public)
-- `reels` (public)
-- `stories` (public)
+In Supabase Dashboard → **Storage**, create these buckets (public):
+- `avatars`
+- `posts`
+- `reels`
+- `stories`
 
-### 5. Run the App
+### 5. Enable Anonymous Auth (for Guest Mode)
+Supabase Dashboard → **Authentication → Providers** → Enable **Anonymous sign-ins**
+
+### 6. Run the App
 ```bash
 # Mobile
 flutter run
@@ -309,17 +144,48 @@ flutter run -d chrome
 flutter run -d macos  # or windows, linux
 ```
 
+## 📱 Get a Release Build (No Local Flutter Needed!)
+
+**GitHub Actions builds APKs automatically.**
+
+### 1. Add Secrets to GitHub
+Repo → **Settings → Secrets and variables → Actions** → Add:
+- `SUPABASE_URL` = `https://your-project.supabase.co`
+- `SUPABASE_ANON_KEY` = `eyJhbGciOiJIUzI1NiIs...`
+
+### 2. Trigger Build
+**Option A: Push a tag (creates GitHub Release)**
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+**Option B: Manual**
+1. Go to **Actions → Build Android** → **Run workflow**
+2. Select branch → **Run workflow**
+
+### 3. Download
+- **Actions tab** → Click build → **Artifacts** → Download `ripple-release-apks.zip`
+- **Releases page** (if tagged) → Download APK/AAB directly
+
 ## 🎯 Key Implementation Details
 
 ### Authentication Flow
 1. **Splash Screen** → Checks session → Routes to Feed or Login
 2. **Login/Register** → Supabase Auth → Creates profile on signup
-3. **Router Guards** → Protects routes + `AuthGuard` for in-app actions
+3. **Guest Mode** → "Check It Out" button → Anonymous auth → Browse only
+4. **Router Guards** → Protects routes + `AuthGuard` for in-app actions
 
 ### Bottom Navigation
 - 5 tabs: Home, Explore, Create (center FAB), Messages, Profile
 - `StatefulShellRoute.indexedStack` preserves tab state
 - Center FAB opens create modal (Post, Reel, Story)
+
+### Guest Mode
+- Tap "Check It Out" on Login/Register → Creates anonymous session
+- Can browse: Feed, Reels, Explore, Profiles, Post/Reel details
+- Blocked actions (like, comment, save, follow, message, create) → "Sign In Required" dialog
+- Exit via Profile/Settings → "Switch to Real Account"
 
 ### Media Handling
 - **Posts**: Up to 10 images/videos (carousel)
@@ -329,7 +195,7 @@ flutter run -d macos  # or windows, linux
 
 ### Real-time Features
 - Messages: Supabase Realtime on `messages` table
-- Feed/Reels: Could add streams for live updates (currently pull-to-refresh)
+- Feed/Reels: Pull-to-refresh (streams ready to add)
 
 ### Color Signature
 **Amber → Copper → Rose** gradient replaces Instagram's pink/orange/yellow:
