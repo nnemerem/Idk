@@ -90,6 +90,8 @@ class ShareSheet extends StatelessWidget {
           const SizedBox(height: 20),
           ElevatedButton.icon(
             onPressed: () async {
+              // Honest implementation: no OS share_plus dependency in this
+              // project — the link is copied to the clipboard instead.
               await Clipboard.setData(ClipboardData(text: '$shareText $link'));
               if (context.mounted) {
                 Navigator.of(context).pop();
