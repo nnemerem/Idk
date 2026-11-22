@@ -14,17 +14,13 @@ jobs:
   build:
     name: Build Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    container:
+      image: cirrusci/flutter:3.22.3
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2.14.0
-        with:
-          flutter-version: '3.22.3'
-          channel: 'stable'
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -41,9 +37,8 @@ jobs:
           fi
           echo "✅ Secrets verified"
 
-      # - name: Flutter doctor
-#   run: flutter doctor -v
-# Temporarily disabled
+      - name: Show Flutter version
+        run: flutter --version
 
       - name: Show pubspec.yaml
         run: cat pubspec.yaml
