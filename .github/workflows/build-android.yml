@@ -66,8 +66,14 @@ jobs:
           curl -s -o /dev/null -w "%{http_code}" https://pub.dev || echo "curl failed"
           ping -c 2 pub.dev || echo "ping failed"
 
-      - name: Install dependencies
-        run: flutter pub get
+      - name: Install dependencies (with retry)
+        run: |
+          for i in 1 2 3; do
+            echo "Attempt $i: flutter pub get"
+            flutter pub get && break
+            echo "Attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
 
       - name: Verify Flutter analyze
         run: flutter analyze --no-fatal-infos
