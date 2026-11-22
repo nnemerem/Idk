@@ -241,14 +241,14 @@ class _SearchScreenState extends State<SearchScreen> {
           ),
           const SizedBox(height: 16),
           Text(
-            'Search for people, places, and more',
+            'Search for people, posts, and reels',
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
               color: RippleColors.textSecondary,
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            'Your recent searches will appear here',
+            'Posts, accounts, and reels from the community',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               color: RippleColors.textTertiary,
             ),
