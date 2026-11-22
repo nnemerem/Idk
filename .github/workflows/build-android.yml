@@ -57,6 +57,15 @@ jobs:
       - name: Flutter version
         run: flutter --version
 
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      - name: Test network connectivity
+        run: |
+          echo "Testing pub.dev connectivity..."
+          curl -s -o /dev/null -w "%{http_code}" https://pub.dev || echo "curl failed"
+          ping -c 2 pub.dev || echo "ping failed"
+
       - name: Install dependencies (with output capture)
         run: |
           flutter pub get --verbose 2>&1 | tee pub_get_output.txt
