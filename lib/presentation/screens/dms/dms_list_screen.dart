@@ -28,7 +28,8 @@ class _DmsListScreenState extends State<DmsListScreen> {
 
   Future<void> _loadConversations() async {
     try {
-        if (currentUserId == null) return;
+      final currentUserId = SupabaseService().currentUser?.id;
+      if (currentUserId == null) return;
 
       // Get conversations with last message and other participant
       final response = await SupabaseService().client
@@ -411,7 +412,6 @@ class _NewMessageSheetState extends State<_NewMessageSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final currentUserId = SupabaseService().currentUser?.id;
     return Container(
       constraints: BoxConstraints(
         maxHeight: MediaQuery.of(context).size.height * 0.65,

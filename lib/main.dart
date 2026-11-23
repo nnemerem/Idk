@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/router.dart';
 import 'package:ripple/config/constants.dart';

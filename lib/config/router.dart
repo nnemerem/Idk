@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:ripple/core/utils/auth_guard.dart';
 import 'package:ripple/core/utils/guest_mode.dart';
 import 'package:ripple/presentation/screens/auth/login_screen.dart';
 import 'package:ripple/presentation/screens/auth/register_screen.dart';

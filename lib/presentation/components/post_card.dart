@@ -33,7 +33,6 @@ class PostCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final userId = post['user_id'] as String?;
     final profile = post['profiles'] as Map<String, dynamic>?;
     final mediaUrls = _getMediaUrls();
     final isCarousel = mediaUrls.length > 1;
