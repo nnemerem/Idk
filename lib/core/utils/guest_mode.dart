@@ -89,7 +89,7 @@ class GuestMode {
   /// Guard for actions that require authentication
   static Future<bool> guardAction(BuildContext context, String action) async {
     if (isGuestMode && requiresAuth(action)) {
-      showAuthRequired(context, action.replace('_', ' '));
+      showAuthRequired(context, action.split('_').join(' '));
       return false;
     }
     return true;
