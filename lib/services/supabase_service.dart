@@ -16,7 +16,7 @@ class SupabaseService {
     // Defaults: auto-refresh token, persist session, detect session in URL
     await Supabase.initialize(
       url: RippleConstants.supabaseUrl,
-      anonKey: RippleConstants.supabaseAnonKey,
+      publishableKey: RippleConstants.supabaseAnonKey,
       realtimeClientOptions: const RealtimeClientOptions(
         eventsPerSecond: 10,
       ),
