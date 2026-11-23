@@ -9,6 +9,12 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the APK to (e.g. v1.0.0)
+        required: true
+        default: 'v1.0.0'
+        type: string
 
 permissions:
   contents: write
@@ -92,6 +98,18 @@ jobs:
           tail -n 100 diag.final | cut -c1-400 > diag.txt || true
           jq -n --rawfile t diag.txt --arg sha "${{ github.sha }}" '{name:"Release diagnostics",head_sha:$sha,status:"completed",conclusion:"failure",output:{title:"Release diagnostics",summary:"Tail of the failed build.",text:$t}}' > diag.json
           gh api -X POST "repos/${{ github.repository }}/check-runs" --input diag.json > /dev/null && echo "diagnostics recorded" || echo "diagnostics upload failed"
+
+      - name: Upload APK (manual dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' && !failure() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            gh release upload "$RELEASE_TAG" build/app/outputs/flutter-apk/app-release.apk --clobber --repo ${{ github.repository }}
+          else
+            echo "No tag provided — skipping release upload"
+          fi
 
       - name: Create Release (tag push)
         if: startsWith(github.ref, 'refs/tags/') && !failure()
