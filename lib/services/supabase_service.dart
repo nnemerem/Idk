@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:ripple/config/constants.dart';
+import 'package:ripple/services/media_service.dart';
 
 /// Raised when the app is built without valid Supabase configuration
 /// (missing/placeholder SUPABASE_URL or SUPABASE_ANON_KEY at build time).
@@ -205,7 +206,7 @@ class SupabaseService {
           upsert: true,
         ),
       );
-      return client.storage.from(bucket).getPublicUrl(path);
+      return MediaService.getPublicUrl(bucket: bucket, path: path);
     } catch (e) {
       return null;
     }
@@ -218,7 +219,7 @@ class SupabaseService {
 
   // Get public URL
   String getPublicUrl(String bucket, String path) {
-    return client.storage.from(bucket).getPublicUrl(path);
+    return MediaService.getPublicUrl(bucket: bucket, path: path);
   }
 
   // Follow/unfollow user
