@@ -30,7 +30,6 @@ jobs:
       - name: Fix DNS
         run: |
           echo "108.157.235.202 pub.dev" | sudo tee -a /etc/hosts
-          echo "108.157.235.202 storage.googleapis.com" | sudo tee -a /etc/hosts
 
       - name: Install Flutter SDK (stable)
         run: |
