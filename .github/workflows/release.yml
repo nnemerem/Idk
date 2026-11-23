@@ -66,11 +66,7 @@ jobs:
             build/app/outputs/flutter-apk/app-release.apk \
             --repo "${{ github.repository }}" \
             --title "Ripple ${{ github.ref_name }}" \
-            --notes "## Ripple ${{ github.ref_name }}
-
-          Release-signed build from CI (debug signing if android/key/keystore.properties is not configured).
-
-          **APK:** attach the ripple-release-apk artifact from this workflow run." || \
+            --generate-notes --latest || \
           gh release upload "${{ github.ref_name }}" \
             build/app/outputs/flutter-apk/app-release.apk \
             --repo "${{ github.repository }}" --clobber
