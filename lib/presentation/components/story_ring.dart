@@ -234,9 +234,6 @@ class _StoryViewerState extends State<StoryViewer>
 
   int _storyIndexInGroup(int flatIndex) => flatIndex - _groupStart[_groupOf(flatIndex)];
 
-  int _storiesInCurrentGroup(int flatIndex) =>
-      _groupEnd[_groupOf(flatIndex)] - _groupStart[_groupOf(flatIndex)] + 1;
-
   Duration _durationFor(int flatIndex) {
     final story = _flat[flatIndex];
     final mediaType = story['media_type'] as String? ?? 'image';

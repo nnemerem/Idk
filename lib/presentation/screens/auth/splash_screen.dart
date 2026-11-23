@@ -4,7 +4,6 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
-import 'package:ripple/config/router.dart';
 import 'package:ripple/services/supabase_service.dart';
 
 class SplashScreen extends StatefulWidget {

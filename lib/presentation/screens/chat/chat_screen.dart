@@ -4,9 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:timeago/timeago.dart' as timeago;
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
 import 'package:ripple/services/supabase_service.dart';
@@ -26,7 +24,6 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _messageController = TextEditingController();
   StreamSubscription<List<Map<String, dynamic>>>? _messagesSubscription;
   List<Map<String, dynamic>> _messages = [];
-  Map<String, dynamic>? _conversation;
   Map<String, dynamic>? _otherParticipant;
   bool _isLoading = true;
   bool _isSending = false;
@@ -63,8 +60,6 @@ class _ChatScreenState extends State<ChatScreen> {
           ''')
           .eq('id', widget.conversationId)
           .single();
-
-      _conversation = convResponse;
 
       // Find other participant
       final participants = convResponse['participants'] as List<dynamic>;

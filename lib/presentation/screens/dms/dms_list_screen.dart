@@ -1,12 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
-import 'package:ripple/config/router.dart';
 import 'package:ripple/services/supabase_service.dart';
 import 'package:ripple/services/conversation_service.dart';
 
@@ -30,8 +28,7 @@ class _DmsListScreenState extends State<DmsListScreen> {
 
   Future<void> _loadConversations() async {
     try {
-      final currentUserId = SupabaseService().currentUser?.id;
-      if (currentUserId == null) return;
+        if (currentUserId == null) return;
 
       // Get conversations with last message and other participant
       final response = await SupabaseService().client

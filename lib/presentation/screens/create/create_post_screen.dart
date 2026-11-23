@@ -2,7 +2,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:video_player/video_player.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:ripple/config/theme.dart';
@@ -19,7 +18,6 @@ class CreatePostScreen extends StatefulWidget {
 class _CreatePostScreenState extends State<CreatePostScreen> {
   final _captionController = TextEditingController();
   final _locationController = TextEditingController();
-  final List<File> _selectedImages = [];
   final List<XFile> _selectedFiles = [];
   bool _isPosting = false;
   final ImagePicker _picker = ImagePicker();
@@ -289,43 +287,6 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
     );
   }
 
-  Widget _buildActionRow({
-    required String iconAsset,
-    required String label,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Row(
-          children: [
-            SvgPicture.asset(
-              iconAsset,
-              width: 22,
-              height: 22,
-              colorFilter: ColorFilter.mode(RippleColors.textSecondary, BlendMode.srcIn),
-            ),
-            const SizedBox(width: 16),
-            Text(
-              label,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const Spacer(),
-            SvgPicture.asset(
-              'assets/icons/chevron_right.svg',
-              width: 20,
-              height: 20,
-              colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 class _MediaPreviewItem extends StatefulWidget {

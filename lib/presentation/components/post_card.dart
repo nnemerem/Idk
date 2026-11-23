@@ -56,25 +56,25 @@ class PostCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Header
-          _buildHeader(profile, location, createdAt),
+          _buildHeader(context, profile, location, createdAt),
 
           // Media (image/video/carousel)
-          _buildMedia(mediaUrls, isCarousel),
+          _buildMedia(context, mediaUrls, isCarousel),
 
           // Actions
-          _buildActions(likesCount, commentsCount, isLiked),
+          _buildActions(context, likesCount, commentsCount, isLiked),
 
           // Likes count
-          if (likesCount > 0) _buildLikesCount(likesCount),
+          if (likesCount > 0) _buildLikesCount(context, likesCount),
 
           // Caption
-          if (caption != null && caption.isNotEmpty) _buildCaption(profile, caption),
+          if (caption != null && caption.isNotEmpty) _buildCaption(context, profile, caption),
 
           // Comments preview
-          if (commentsCount > 0) _buildCommentsPreview(commentsCount),
+          if (commentsCount > 0) _buildCommentsPreview(context, commentsCount),
 
           // Timestamp
-          if (createdAt != null) _buildTimestamp(createdAt),
+          if (createdAt != null) _buildTimestamp(context, createdAt),
         ],
       ),
     );
@@ -115,6 +115,7 @@ class PostCard extends StatelessWidget {
   }
 
   Widget _buildHeader(
+    BuildContext context,
     Map<String, dynamic>? profile,
     String? location,
     String? createdAt,
@@ -230,11 +231,11 @@ class PostCard extends StatelessWidget {
     );
   }
 
-  Widget _buildMedia(List<String> mediaUrls, bool isCarousel) {
+  Widget _buildMedia(BuildContext context, List<String> mediaUrls, bool isCarousel) {
     if (mediaUrls.isEmpty) return const SizedBox.shrink();
 
     if (isCarousel) {
-      return _buildCarousel(mediaUrls);
+      return _buildCarousel(context, mediaUrls);
     }
 
     // Single media
@@ -307,7 +308,7 @@ class PostCard extends StatelessWidget {
     );
   }
 
-  Widget _buildCarousel(List<String> mediaUrls) {
+  Widget _buildCarousel(BuildContext context, List<String> mediaUrls) {
     return SizedBox(
       height: MediaQuery.of(context).size.width,
       child: PageView.builder(
@@ -357,7 +358,7 @@ class PostCard extends StatelessWidget {
     );
   }
 
-  Widget _buildActions(int likesCount, int commentsCount, bool isLiked) {
+  Widget _buildActions(BuildContext context, int likesCount, int commentsCount, bool isLiked) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: Row(
@@ -421,7 +422,7 @@ class PostCard extends StatelessWidget {
     );
   }
 
-  Widget _buildLikesCount(int count) {
+  Widget _buildLikesCount(BuildContext context, int count) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: GestureDetector(
@@ -443,7 +444,7 @@ class PostCard extends StatelessWidget {
     );
   }
 
-  Widget _buildCaption(Map<String, dynamic>? profile, String caption) {
+  Widget _buildCaption(BuildContext context, Map<String, dynamic>? profile, String caption) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: RichText(
@@ -466,7 +467,7 @@ class PostCard extends StatelessWidget {
     );
   }
 
-  Widget _buildCommentsPreview(int count) {
+  Widget _buildCommentsPreview(BuildContext context, int count) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: GestureDetector(
@@ -481,7 +482,7 @@ class PostCard extends StatelessWidget {
     );
   }
 
-  Widget _buildTimestamp(String createdAt) {
+  Widget _buildTimestamp(BuildContext context, String createdAt) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Text(

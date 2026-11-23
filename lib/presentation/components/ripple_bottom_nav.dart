@@ -3,7 +3,6 @@ import 'package:go_router/go_router.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
-import 'package:ripple/config/router.dart';
 import 'package:ripple/core/utils/guest_mode.dart';
 
 class RippleBottomNav extends StatefulWidget {
@@ -21,7 +20,6 @@ class RippleBottomNav extends StatefulWidget {
 class _RippleBottomNavState extends State<RippleBottomNav>
     with SingleTickerProviderStateMixin {
   late AnimationController _animationController;
-  late Animation<double> _scaleAnimation;
 
   @override
   void initState() {
@@ -29,9 +27,6 @@ class _RippleBottomNavState extends State<RippleBottomNav>
     _animationController = AnimationController(
       duration: RippleConstants.animationFast,
       vsync: this,
-    );
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.9).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
     );
   }
 

@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:video_player/video_player.dart';
-import 'package:timeago/timeago.dart' as timeago;
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
@@ -115,7 +114,6 @@ class _ReelCardState extends State<ReelCard> {
     final likesCount = _getLikesCount();
     final commentsCount = _getCommentsCount();
     final isLiked = _getIsLiked();
-    final videoUrl = widget.reel['video_url'] as String?;
     final thumbnailUrl = widget.reel['thumbnail_url'] as String?;
 
     return GestureDetector(
