@@ -1,5 +1,4 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:ripple/config/constants.dart';
 
 /// Which media provider the app uses to construct media URLs.
 ///
