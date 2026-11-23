@@ -9,6 +9,7 @@ import 'package:ripple/services/supabase_service.dart';
 import 'package:ripple/core/utils/guest_mode.dart';
 import 'package:ripple/core/utils/auth_guard.dart';
 import 'package:ripple/presentation/components/followers_list_sheet.dart';
+import 'package:ripple/presentation/components/update_banner.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -271,6 +272,9 @@ class _ProfileScreenState extends State<ProfileScreen>
               backgroundColor: RippleColors.surface,
               child: CustomScrollView(
                 slivers: [
+                  // Update banner (if a newer release is published)
+                  const SliverToBoxAdapter(child: UpdateBanner()),
+
                   // Profile header
                   SliverToBoxAdapter(child: _buildProfileHeader()),
 

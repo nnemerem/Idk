@@ -11,6 +11,7 @@ import 'package:ripple/presentation/components/story_ring.dart';
 import 'package:ripple/presentation/components/post_card.dart';
 import 'package:ripple/presentation/components/share_sheet.dart';
 import 'package:ripple/presentation/components/ripple_shimmer.dart';
+import 'package:ripple/presentation/components/update_banner.dart';
 
 class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
@@ -529,6 +530,10 @@ class _FeedScreenState extends State<FeedScreen>
         child: CustomScrollView(
           controller: _scrollController,
           slivers: [
+            // Update banner (if a newer release is published)
+            const SliverToBoxAdapter(
+              child: UpdateBanner(),
+            ),
             // Stories bar
             if (_isLoadingStories)
               SliverToBoxAdapter(
