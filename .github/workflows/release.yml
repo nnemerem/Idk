@@ -89,7 +89,7 @@ jobs:
         run: |
           { [ -f diag.txt ] && cat diag.txt; [ -f build.log ] && tail -n 100 build.log; } > diag.final || true
           if [ ! -s diag.final ]; then echo "(see the failed step in the Actions log)" > diag.final; fi
-          tail -n 60 diag.final | cut -c1-170 > diag.txt || true
+          tail -n 100 diag.final | cut -c1-400 > diag.txt || true
           jq -n --rawfile t diag.txt --arg sha "${{ github.sha }}" '{name:"Release diagnostics",head_sha:$sha,status:"completed",conclusion:"failure",output:{title:"Release diagnostics",summary:"Tail of the failed build.",text:$t}}' > diag.json
           gh api -X POST "repos/${{ github.repository }}/check-runs" --input diag.json > /dev/null && echo "diagnostics recorded" || echo "diagnostics upload failed"
 
