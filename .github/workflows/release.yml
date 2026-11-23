@@ -25,12 +25,25 @@ jobs:
 
       - name: Install Flutter SDK (stable)
         run: |
+          set -o pipefail
+          tee diag.txt <<< "Downloading Flutter SDK..."
           curl -fSL --retry 3 --retry-delay 5 -o /tmp/flutter.tar.xz \
-            https://storage.googleapis.com/flutter_infra/releases/stable/linux/flutter_linux_stable.tar.xz
-          sudo tar -xJf /tmp/flutter.tar.xz -C /opt/flutter --strip-components=1
+            https://storage.googleapis.com/flutter_infra/releases/stable/linux/flutter_linux_stable.tar.xz 2>&1 | tee -a diag.txt || true
+          if [ ! -s /tmp/flutter.tar.xz ]; then
+            echo "FLUTTER SDK DOWNLOAD FAILED (curl error above in diag.txt)" >> diag.txt
+            cat diag.txt
+            exit 1
+          fi
+          sudo tar -xJf /tmp/flutter.tar.xz -C /opt/flutter --strip-components=1 2>&1 | tee -a diag.txt
+          if [ ! -d /opt/flutter/bin ]; then
+            echo "FLUTTER SDK EXTRACT FAILED (see diag.txt)" >> diag.txt
+            cat diag.txt
+            exit 1
+          fi
           sudo chown -R $USER /opt/flutter
           echo "/opt/flutter/bin" >> $GITHUB_PATH
           git config --global --add safe.directory /opt/flutter
+          /opt/flutter/bin/flutter --version 2>&1 | tee -a diag.txt
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -63,8 +76,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tail -n 120 build.log 2>/dev/null | cut -c1-170 > diag.txt || true
-          if [ ! -s diag.txt ]; then echo "(failure before build — check the failed step)" > diag.txt; fi
+          { [ -f diag.txt ] && cat diag.txt; [ -f build.log ] && tail -n 100 build.log; } > diag.final || true
+          if [ ! -s diag.final ]; then echo "(see the failed step in the Actions log)" > diag.final; fi
+          tail -n 60 diag.final | cut -c1-170 > diag.txt || true
           jq -n --rawfile t diag.txt --arg sha "${{ github.sha }}" '{name:"Release diagnostics",head_sha:$sha,status:"completed",conclusion:"failure",output:{title:"Release diagnostics",summary:"Tail of the failed build.",text:$t}}' > diag.json
           gh api -X POST "repos/${{ github.repository }}/check-runs" --input diag.json > /dev/null && echo "diagnostics recorded" || echo "diagnostics upload failed"
 
