@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:ripple/presentation/components/likes_list_sheet.dart';
 import 'package:ripple/presentation/components/double_tap_like_burst.dart';
+import 'package:ripple/presentation/components/animated_action_button.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:video_player/video_player.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -365,7 +366,7 @@ class PostCard extends StatelessWidget {
       child: Row(
         children: [
           // Like
-          IconButton(
+          AnimatedActionButton(
             icon: SvgPicture.asset(
               isLiked ? 'assets/icons/heart_filled.svg' : 'assets/icons/heart.svg',
               width: 28,
@@ -375,9 +376,7 @@ class PostCard extends StatelessWidget {
                 BlendMode.srcIn,
               ),
             ),
-            onPressed: () => onLike(post['id'] as String, isLiked),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+            onTap: () => onLike(post['id'] as String, isLiked),
           ),
           const SizedBox(width: 4),
           // Comment
@@ -405,7 +404,7 @@ class PostCard extends StatelessWidget {
           ),
           const Spacer(),
           // Save
-          IconButton(
+          AnimatedActionButton(
             icon: SvgPicture.asset(
               isSaved ? 'assets/icons/bookmark_filled.svg' : 'assets/icons/bookmark.svg',
               width: 28,
@@ -414,9 +413,7 @@ class PostCard extends StatelessWidget {
                   ? const ColorFilter.mode(Colors.white, BlendMode.srcIn)
                   : null,
             ),
-            onPressed: () => onSave(post['id'] as String),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+            onTap: () => onSave(post['id'] as String),
           ),
         ],
       ),

@@ -10,6 +10,7 @@ import 'package:ripple/core/utils/guest_mode.dart';
 import 'package:ripple/presentation/components/story_ring.dart';
 import 'package:ripple/presentation/components/post_card.dart';
 import 'package:ripple/presentation/components/share_sheet.dart';
+import 'package:ripple/presentation/components/ripple_shimmer.dart';
 
 class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
@@ -732,20 +733,27 @@ class _FeedScreenState extends State<FeedScreen>
       margin: const EdgeInsets.symmetric(horizontal: 6),
       child: Column(
         children: [
-          Container(
-            width: 68,
-            height: 68,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: RippleColors.surfaceVariant,
+          RippleShimmer(
+            shape: BoxShape.circle,
+            child: Container(
+              width: 68,
+              height: 68,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: RippleColors.surfaceVariant,
+              ),
             ),
           ),
           const SizedBox(height: 6),
-          Container(
-            height: 12,
-            decoration: BoxDecoration(
-              color: RippleColors.surfaceVariant,
-              borderRadius: BorderRadius.circular(6),
+          RippleShimmer(
+            borderRadius: BorderRadius.circular(6),
+            child: Container(
+              width: double.infinity,
+              height: 12,
+              decoration: BoxDecoration(
+                color: RippleColors.surfaceVariant,
+                borderRadius: BorderRadius.circular(6),
+              ),
             ),
           ),
         ],
@@ -811,33 +819,42 @@ class _FeedScreenState extends State<FeedScreen>
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(
               children: [
-                Container(
-                  width: 32,
-                  height: 32,
-                  decoration: BoxDecoration(
-                    color: RippleColors.surfaceVariant,
-                    shape: BoxShape.circle,
+                RippleShimmer(
+                  shape: BoxShape.circle,
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: RippleColors.surfaceVariant,
+                      shape: BoxShape.circle,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 12),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Container(
-                      width: 100,
-                      height: 14,
-                      decoration: BoxDecoration(
-                        color: RippleColors.surfaceVariant,
-                        borderRadius: BorderRadius.circular(4),
+                    RippleShimmer(
+                      borderRadius: BorderRadius.circular(4),
+                      child: Container(
+                        width: 100,
+                        height: 14,
+                        decoration: BoxDecoration(
+                          color: RippleColors.surfaceVariant,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
                       ),
                     ),
                     const SizedBox(height: 4),
-                    Container(
-                      width: 60,
-                      height: 12,
-                      decoration: BoxDecoration(
-                        color: RippleColors.surfaceVariant,
-                        borderRadius: BorderRadius.circular(4),
+                    RippleShimmer(
+                      borderRadius: BorderRadius.circular(4),
+                      child: Container(
+                        width: 60,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: RippleColors.surfaceVariant,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
                       ),
                     ),
                   ],
@@ -846,20 +863,27 @@ class _FeedScreenState extends State<FeedScreen>
             ),
           ),
           // Image skeleton
-          Container(
-            color: RippleColors.surfaceVariant,
-            height: MediaQuery.of(context).size.width,
+          RippleShimmer(
+            child: Container(
+              width: double.infinity,
+              color: RippleColors.surfaceVariant,
+              height: MediaQuery.of(context).size.width,
+            ),
           ),
           // Actions skeleton
           Padding(
             padding: const EdgeInsets.all(16),
             child: Row(
               children: List.generate(4, (index) => Expanded(
-                child: Container(
-                  height: 24,
-                  decoration: BoxDecoration(
-                    color: RippleColors.surfaceVariant,
-                    borderRadius: BorderRadius.circular(12),
+                child: RippleShimmer(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    width: double.infinity,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: RippleColors.surfaceVariant,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
                 ),
               )),
@@ -872,12 +896,15 @@ class _FeedScreenState extends State<FeedScreen>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: List.generate(3, (index) => Padding(
                 padding: const EdgeInsets.only(bottom: 8),
-                child: Container(
-                  width: double.infinity,
-                  height: 14,
-                  decoration: BoxDecoration(
-                    color: RippleColors.surfaceVariant,
-                    borderRadius: BorderRadius.circular(4),
+                child: RippleShimmer(
+                  borderRadius: BorderRadius.circular(4),
+                  child: Container(
+                    width: double.infinity,
+                    height: 14,
+                    decoration: BoxDecoration(
+                      color: RippleColors.surfaceVariant,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
                   ),
                 ),
               )),
