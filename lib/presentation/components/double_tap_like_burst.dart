@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:ripple/config/theme.dart';
 
 /// A gesture wrapper for post media: single-tap forwards to [onTap],
 /// double-tap triggers the Instagram-style animated heart burst and calls
