@@ -45,6 +45,7 @@ jobs:
             echo "FLUTTER SDK DOWNLOAD FAILED" | tee -a diag.txt
             exit 1
           fi
+          sudo mkdir -p /opt/flutter
           sudo tar -xJf /tmp/flutter.tar.xz -C /opt/flutter --strip-components=1 >> diag.txt 2>&1 || { echo "FLUTTER SDK EXTRACT FAILED" | tee -a diag.txt; exit 1; }
           if [ ! -d /opt/flutter/bin ]; then
             echo "FLUTTER SDK EXTRACT FAILED (no bin dir)" | tee -a diag.txt
