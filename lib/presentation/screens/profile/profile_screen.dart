@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
@@ -9,8 +8,6 @@ import 'package:ripple/config/router.dart';
 import 'package:ripple/services/supabase_service.dart';
 import 'package:ripple/core/utils/guest_mode.dart';
 import 'package:ripple/core/utils/auth_guard.dart';
-import 'package:ripple/presentation/screens/profile/edit_profile_screen.dart';
-import 'package:ripple/presentation/screens/profile/settings_screen.dart';
 import 'package:ripple/presentation/components/followers_list_sheet.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -21,7 +18,7 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, RouteAware {
   late TabController _tabController;
   Map<String, dynamic>? _profile;
   List<Map<String, dynamic>> _posts = [];
@@ -41,6 +38,12 @@ class _ProfileScreenState extends State<ProfileScreen>
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    routeObserver.subscribe(this, ModalRoute.of(context)!);
+  }
+
+  @override
   void didPopNext() {
     super.didPopNext();
     _loadProfile();
@@ -50,6 +53,7 @@ class _ProfileScreenState extends State<ProfileScreen>
 
   @override
   void dispose() {
+    routeObserver.unsubscribe(this);
     _tabController.dispose();
     super.dispose();
   }
@@ -297,7 +301,7 @@ class _ProfileScreenState extends State<ProfileScreen>
                           fontSize: 14,
                           fontWeight: FontWeight.w500,
                         ),
-                        tabs: const [
+                        tabs: [
                           Tab(icon: SvgPicture.asset('assets/icons/grid_on.svg', width: 24, height: 24)),
                           Tab(icon: SvgPicture.asset('assets/icons/video_library.svg', width: 24, height: 24)),
                           Tab(icon: SvgPicture.asset('assets/icons/bookmark.svg', width: 24, height: 24)),

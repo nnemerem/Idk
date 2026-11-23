@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
@@ -262,7 +261,7 @@ class _UserProfileScreenState extends State<UserProfileScreen>
                               fontSize: 14,
                               fontWeight: FontWeight.w500,
                             ),
-                            tabs: const [
+                            tabs: [
                               Tab(icon: SvgPicture.asset('assets/icons/grid_on.svg', width: 24, height: 24)),
                               Tab(icon: SvgPicture.asset('assets/icons/video_library.svg', width: 24, height: 24)),
                             ],

@@ -358,7 +358,6 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
     final likesCount = _getLikesCount();
     final commentsCount = _getCommentsCount();
     final isLiked = _getIsLiked();
-    final videoUrl = _reel!['video_url'] as String?;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -754,7 +753,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  '$commentsCount',
+                  '${_getCommentsCount()}',
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                     color: RippleColors.textSecondary,
                   ),

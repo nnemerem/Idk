@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -121,6 +120,16 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         );
       }
     }
+  }
+
+  ImageProvider<Object>? _buildAvatarProvider() {
+    if (_selectedImage != null) {
+      return FileImage(_selectedImage!);
+    }
+    if (_avatarUrl != null) {
+      return CachedNetworkImageProvider(_avatarUrl!);
+    }
+    return null;
   }
 
   void _showImagePickerOptions() {
@@ -294,11 +303,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                           CircleAvatar(
                             radius: 55,
                             backgroundColor: RippleColors.surfaceVariant,
-                            backgroundImage: _selectedImage != null
-                                ? FileImage(_selectedImage!)
-                                : _avatarUrl != null
-                                    ? CachedNetworkImageProvider(_avatarUrl!)
-                                    : null,
+                            backgroundImage: _buildAvatarProvider(),
                             child: _selectedImage == null && _avatarUrl == null
                                 ? Text(
                                     _profile?['username']?[0]?.toUpperCase() ?? '?',

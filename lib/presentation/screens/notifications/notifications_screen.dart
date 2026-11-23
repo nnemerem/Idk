@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
 import 'package:ripple/services/supabase_service.dart';
@@ -327,7 +326,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                   ),
                 if (body != null && body.isNotEmpty)
                   Padding(
-                    padding: const EdgeInsets.only(top: title != null && title.isNotEmpty ? 2 : 0),
+                    padding: EdgeInsets.only(top: title != null && title.isNotEmpty ? 2 : 0),
                     child: Text(
                       body,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(

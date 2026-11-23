@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
 import 'package:ripple/config/router.dart';
@@ -20,7 +18,8 @@ class FeedScreen extends StatefulWidget {
   State<FeedScreen> createState() => _FeedScreenState();
 }
 
-class _FeedScreenState extends State<FeedScreen> {
+class _FeedScreenState extends State<FeedScreen>
+    with RouteAware {
   final ScrollController _scrollController = ScrollController();
   List<Map<String, dynamic>> _posts = [];
   List<StoryUserGroup> _storyUsers = [];
@@ -42,6 +41,12 @@ class _FeedScreenState extends State<FeedScreen> {
     _loadSavedPosts();
     _loadUnreadNotifications();
     _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    routeObserver.subscribe(this, ModalRoute.of(context)!);
   }
 
   @override
@@ -73,6 +78,7 @@ class _FeedScreenState extends State<FeedScreen> {
 
   @override
   void dispose() {
+    routeObserver.unsubscribe(this);
     _scrollController.dispose();
     super.dispose();
   }
@@ -188,7 +194,7 @@ class _FeedScreenState extends State<FeedScreen> {
           .eq('user_id', userId)
           .gte('expires_at', DateTime.now().toIso8601String())
           .order('created_at', ascending: true);
-      if (response is List && response.isNotEmpty) {
+      if (response.isNotEmpty) {
         return List<Map<String, dynamic>>.from(response);
       }
     } catch (_) {

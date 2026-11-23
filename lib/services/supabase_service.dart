@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:ripple/config/constants.dart';
 
@@ -11,14 +13,10 @@ class SupabaseService {
   Future<void> initialize() async {
     if (_initialized) return;
 
+    // Defaults: auto-refresh token, persist session, detect session in URL
     await Supabase.initialize(
       url: RippleConstants.supabaseUrl,
       anonKey: RippleConstants.supabaseAnonKey,
-      authOptions: const AuthOptions(
-        autoRefreshToken: true,
-        persistSession: true,
-        detectSessionInUrl: true,
-      ),
       realtimeClientOptions: const RealtimeClientOptions(
         eventsPerSecond: 10,
       ),
@@ -28,7 +26,8 @@ class SupabaseService {
   }
 
   SupabaseClient get client => Supabase.instance.client;
-  SupabaseAuthClient get auth => Supabase.instance.client.auth;
+  // Explicit type depends on the supabase_flutter version; keep it dynamic.
+  dynamic get auth => Supabase.instance.client.auth;
   RealtimeClient get realtime => Supabase.instance.client.realtime;
 
   // Auth helpers
@@ -37,7 +36,7 @@ class SupabaseService {
   bool get isAuthenticated => currentUser != null;
 
   // Stream of auth state changes
-  Stream<AuthState> get authStateChanges => auth.onAuthStateChange;
+  Stream<dynamic> get authStateChanges => auth.onAuthStateChange;
 
   // Sign up with email and password
   Future<AuthResponse> signUp({
@@ -172,7 +171,7 @@ class SupabaseService {
     try {
       await client.storage.from(bucket).uploadBinary(
         path,
-        bytes,
+        Uint8List.fromList(bytes),
         fileOptions: FileOptions(
           contentType: contentType,
           upsert: true,
@@ -279,7 +278,7 @@ class SupabaseService {
         .eq('following_id', userId)
         .count(CountOption.exact);
 
-    return response.count ?? 0;
+    return response.count;
   }
 
   // Get following count
@@ -290,6 +289,6 @@ class SupabaseService {
         .eq('follower_id', userId)
         .count(CountOption.exact);
 
-    return response.count ?? 0;
+    return response.count;
   }
 }

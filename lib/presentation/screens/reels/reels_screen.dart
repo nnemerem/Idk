@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
 import 'package:ripple/config/router.dart';
@@ -18,7 +17,7 @@ class ReelsScreen extends StatefulWidget {
   State<ReelsScreen> createState() => _ReelsScreenState();
 }
 
-class _ReelsScreenState extends State<ReelsScreen> {
+class _ReelsScreenState extends State<ReelsScreen> with RouteAware {
   final PageController _pageController = PageController();
   List<Map<String, dynamic>> _reels = [];
   bool _isLoading = true;
@@ -36,6 +35,12 @@ class _ReelsScreenState extends State<ReelsScreen> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    routeObserver.subscribe(this, ModalRoute.of(context)!);
+  }
+
+  @override
   void didPopNext() {
     super.didPopNext();
     _loadReels(refresh: true);
@@ -44,6 +49,7 @@ class _ReelsScreenState extends State<ReelsScreen> {
 
   @override
   void dispose() {
+    routeObserver.unsubscribe(this);
     _pageController.dispose();
     super.dispose();
   }

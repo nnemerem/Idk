@@ -25,9 +25,12 @@ import 'package:ripple/presentation/screens/profile/edit_profile_screen.dart';
 import 'package:ripple/presentation/components/ripple_bottom_nav.dart';
 import 'package:ripple/config/constants.dart';
 
+final RouteObserver<ModalRoute<void>> routeObserver = RouteObserver<ModalRoute<void>>();
+
 final GoRouter appRouter = GoRouter(
   initialLocation: RippleConstants.routeSplash,
   redirect: _redirect,
+  observers: [routeObserver],
   routes: [
     // Auth routes (no bottom nav)
     GoRoute(

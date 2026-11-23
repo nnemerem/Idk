@@ -1,4 +1,3 @@
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:ripple/config/constants.dart';
 import 'package:ripple/services/supabase_service.dart';
 
