@@ -1,0 +1,53 @@
+name: CI
+
+# Analyze the app on every push. Failures publish a "CI diagnostics"
+# check-run with the tail of the error so the real reason is readable
+# from the API even with limited runner access.
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Flutter SDK (stable)
+        run: |
+          curl -fSL --retry 3 --retry-delay 5 -o /tmp/flutter.tar.xz \
+            https://storage.googleapis.com/flutter_infra/releases/stable/linux/flutter_linux_stable.tar.xz
+          sudo tar -xJf /tmp/flutter.tar.xz -C /opt/flutter --strip-components=1
+          sudo chown -R $USER /opt/flutter
+          echo "/opt/flutter/bin" >> $GITHUB_PATH
+          git config --global --add safe.directory /opt/flutter
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-pub --no-fatal-infos
+
+      - name: Publish diagnostics on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tail -n 120 build.log 2>/dev/null | cut -c1-170 > diag.txt || true
+          if [ ! -s diag.txt ]; then echo "(see the failed step in the Actions log)" > diag.txt; fi
+          jq -n --rawfile t diag.txt --arg sha "${{ github.sha }}" '{name:"CI diagnostics",head_sha:$sha,status:"completed",conclusion:"failure",output:{title:"CI diagnostics",summary:"Tail of the failed step.",text:$t}}' > diag.json
+          gh api -X POST "repos/${{ github.repository }}/check-runs" --input diag.json > /dev/null && echo "diagnostics recorded" || echo "diagnostics upload failed"
