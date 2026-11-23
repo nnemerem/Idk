@@ -32,11 +32,15 @@ jobs:
           echo "108.157.235.202 pub.dev" | sudo tee -a /etc/hosts
           echo "108.157.235.202 storage.googleapis.com" | sudo tee -a /etc/hosts
 
-      - name: Setup Flutter (stable)
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-          cache: true
+      - name: Install Flutter SDK (stable)
+        run: |
+          curl -fSL --retry 3 --retry-delay 5 -o /tmp/flutter.tar.xz \
+            https://storage.googleapis.com/flutter_infra/releases/stable/linux/flutter_linux_stable.tar.xz
+          sudo tar -xJf /tmp/flutter.tar.xz -C /opt/flutter --strip-components=1
+          sudo chown -R $USER /opt/flutter
+          echo "/opt/flutter/bin" >> $GITHUB_PATH
+          git config --global --add safe.directory /opt/flutter
+          /opt/flutter/bin/flutter --version
 
       - name: Setup Java
         uses: actions/setup-java@v5
