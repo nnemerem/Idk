@@ -27,18 +27,27 @@ jobs:
       - name: Install Flutter SDK (stable)
         run: |
           set -o pipefail
-          tee diag.txt <<< "Downloading Flutter SDK..."
-          curl -fSL --retry 3 --retry-delay 5 -o /tmp/flutter.tar.xz \
-            https://storage.googleapis.com/flutter_infra/releases/stable/linux/flutter_linux_stable.tar.xz 2>&1 | tee -a diag.txt || true
-          if [ ! -s /tmp/flutter.tar.xz ]; then
-            echo "FLUTTER SDK DOWNLOAD FAILED (curl error above in diag.txt)" >> diag.txt
-            cat diag.txt
+          tee diag.txt <<< "Downloading Flutter SDK (resolving from releases_linux.json)..."
+          MANIFEST_URL="https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json"
+          MANIFEST_BASE="https://storage.googleapis.com/flutter_infra_release/releases"
+          JSON=$(curl -fsSL --connect-timeout 15 --retry 5 "$MANIFEST_URL" 2>&1) || { echo "MANIFEST DOWNLOAD FAILED" | tee diag.txt; cat diag.txt; exit 1; }
+          echo "$JSON" > /tmp/manifest.json
+          URL=$(echo "$JSON" | jq -r '[.releases[] | select(.channel == "stable") | select(.dart_sdk_arch == "x64" or (.dart_sdk_arch == null))][0].archive' 2>&1) || { echo "JQ PARSE FAILED" | tee -a diag.txt; exit 1; }
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "NO STABLE x64 ARCHIVE FOUND IN MANIFEST" | tee -a diag.txt
             exit 1
           fi
-          sudo tar -xJf /tmp/flutter.tar.xz -C /opt/flutter --strip-components=1 2>&1 | tee -a diag.txt
+          echo "Resolved stable archive: $URL" | tee -a diag.txt
+          FULL_URL="$MANIFEST_BASE/$URL"
+          curl --connect-timeout 15 --retry 5 -fSL "$FULL_URL" -o /tmp/flutter.tar.xz > diag.txt 2>&1 || true
+          cat diag.txt
+          if [ ! -s /tmp/flutter.tar.xz ]; then
+            echo "FLUTTER SDK DOWNLOAD FAILED" | tee -a diag.txt
+            exit 1
+          fi
+          sudo tar -xJf /tmp/flutter.tar.xz -C /opt/flutter --strip-components=1 >> diag.txt 2>&1 || { echo "FLUTTER SDK EXTRACT FAILED" | tee -a diag.txt; exit 1; }
           if [ ! -d /opt/flutter/bin ]; then
-            echo "FLUTTER SDK EXTRACT FAILED (see diag.txt)" >> diag.txt
-            cat diag.txt
+            echo "FLUTTER SDK EXTRACT FAILED (no bin dir)" | tee -a diag.txt
             exit 1
           fi
           sudo chown -R $USER /opt/flutter
