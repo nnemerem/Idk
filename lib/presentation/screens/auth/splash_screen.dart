@@ -51,13 +51,17 @@ class _SplashScreenState extends State<SplashScreen>
 
     if (session != null) {
       // Check if user profile exists, if not create it
-      final profile = await SupabaseService().getProfile(session.user.id);
-      if (profile == null) {
-        await SupabaseService().createProfile(
-          userId: session.user.id,
-          username: session.user.userMetadata?['username'] ?? 'user_${session.user.id.substring(0, 8)}',
-          displayName: session.user.userMetadata?['display_name'] ?? 'User',
-        );
+      try {
+        final profile = await SupabaseService().getProfile(session.user.id);
+        if (profile == null) {
+          await SupabaseService().createProfile(
+            userId: session.user.id,
+            username: session.user.userMetadata?['username'] ?? 'user_${session.user.id.substring(0, 8)}',
+            displayName: session.user.userMetadata?['display_name'] ?? 'User',
+          );
+        }
+      } catch (_) {
+        // Profile self-heal is best effort; the session is still valid.
       }
       context.go(RippleConstants.routeFeed);
     } else {

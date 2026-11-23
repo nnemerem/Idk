@@ -3,6 +3,16 @@ import 'dart:typed_data';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:ripple/config/constants.dart';
 
+/// Raised when the app is built without valid Supabase configuration
+/// (missing/placeholder SUPABASE_URL or SUPABASE_ANON_KEY at build time).
+class ConfigurationException implements Exception {
+  final String message;
+  const ConfigurationException(this.message);
+
+  @override
+  String toString() => 'ConfigurationException: $message';
+}
+
 class SupabaseService {
   SupabaseService._internal();
   static final SupabaseService _instance = SupabaseService._internal();
@@ -10,8 +20,26 @@ class SupabaseService {
 
   bool _initialized = false;
 
+  /// Whether the app was built with a usable Supabase configuration.
+  bool get isConfigured {
+    final url = RippleConstants.supabaseUrl;
+    final key = RippleConstants.supabaseAnonKey;
+    return url.isNotEmpty &&
+        key.isNotEmpty &&
+        !url.contains('your-project') &&
+        !key.contains('your-anon-key');
+  }
+
   Future<void> initialize() async {
     if (_initialized) return;
+
+    if (!isConfigured) {
+      throw ConfigurationException(
+        'Ripple is not configured: the app was built without a valid '
+        'SUPABASE_URL or SUPABASE_ANON_KEY. Rebuild with those dart-defines, '
+        'or ask the repo maintainer to add them.',
+      );
+    }
 
     // Defaults: auto-refresh token, persist session, detect session in URL
     await Supabase.initialize(

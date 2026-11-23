@@ -69,6 +69,23 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
+      - name: Verify Supabase configuration (presence only)
+        run: |
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "::error::SUPABASE_URL secret is missing — the app cannot log in without it."
+            echo "::error::Add the secret at: repo Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+          if [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::error::SUPABASE_ANON_KEY secret is missing — the app cannot log in without it."
+            echo "::error::Add the secret at: repo Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+          echo "Supabase configuration present (values not printed)."
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
       - name: Install dependencies
         run: flutter pub get
 

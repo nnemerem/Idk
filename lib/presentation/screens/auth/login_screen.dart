@@ -41,6 +41,16 @@ class _LoginScreenState extends State<LoginScreen> {
       if (mounted) {
         context.go(RippleConstants.routeFeed);
       }
+    } on ConfigurationException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.message),
+            backgroundColor: RippleColors.error,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
     } on AuthException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
