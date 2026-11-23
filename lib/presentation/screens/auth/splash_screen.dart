@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import 'package:ripple/config/theme.dart';
 import 'package:ripple/config/constants.dart';
 import 'package:ripple/services/supabase_service.dart';
@@ -87,11 +86,31 @@ class _SplashScreenState extends State<SplashScreen>
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // App logo with gradient ring
-                    SvgPicture.asset(
-                      'assets/icons/brand_logo.svg',
-                      width: 100,
-                      height: 100,
+                    // App logo (new wave mark) with soft radial glow
+                    Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        Container(
+                          width: 160,
+                          height: 160,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: RadialGradient(
+                              colors: [
+                                RippleColors.primary.withValues(alpha: 0.28),
+                                Colors.transparent,
+                              ],
+                              center: Alignment.center,
+                              radius: 0.75,
+                            ),
+                          ),
+                        ),
+                        Image.asset(
+                          'assets/icons/app_icon.png',
+                          width: 104,
+                          height: 104,
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 24),
                     // App name

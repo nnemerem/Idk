@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:ripple/presentation/components/likes_list_sheet.dart';
+import 'package:ripple/presentation/components/double_tap_like_burst.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:video_player/video_player.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -244,7 +245,7 @@ class PostCard extends StatelessWidget {
       orElse: () => <String, dynamic>{},
     )['type'] == 'video';
 
-    return GestureDetector(
+    return DoubleTapLikeBurst(
       onTap: onTap,
       onDoubleTap: () {
         // Instagram parity: double-tap on media likes the post.
@@ -320,7 +321,8 @@ class PostCard extends StatelessWidget {
           );
           final isVideo = mediaItem?['type'] == 'video';
 
-          return GestureDetector(
+          return DoubleTapLikeBurst(
+            key: ValueKey(mediaUrl),
             onTap: onTap,
             onDoubleTap: () {
               final liked = _getIsLiked();

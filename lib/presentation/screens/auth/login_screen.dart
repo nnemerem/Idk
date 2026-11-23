@@ -83,7 +83,33 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Logo
+                    // Brand mark + wordmark
+                    Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        Container(
+                          width: 104,
+                          height: 104,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: RadialGradient(
+                              colors: [
+                                RippleColors.primary.withValues(alpha: 0.30),
+                                Colors.transparent,
+                              ],
+                              center: Alignment.center,
+                              radius: 0.72,
+                            ),
+                          ),
+                        ),
+                        Image.asset(
+                          'assets/icons/app_icon.png',
+                          width: 64,
+                          height: 64,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
                     ShaderMask(
                       shaderCallback: (bounds) => LinearGradient(
                         colors: RippleColors.brandGradient,
