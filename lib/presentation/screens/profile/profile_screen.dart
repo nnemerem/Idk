@@ -8,6 +8,7 @@ import 'package:ripple/config/constants.dart';
 import 'package:ripple/config/router.dart';
 import 'package:ripple/services/supabase_service.dart';
 import 'package:ripple/core/utils/guest_mode.dart';
+import 'package:ripple/core/utils/auth_guard.dart';
 import 'package:ripple/presentation/screens/profile/edit_profile_screen.dart';
 import 'package:ripple/presentation/screens/profile/settings_screen.dart';
 import 'package:ripple/presentation/components/followers_list_sheet.dart';
@@ -26,6 +27,7 @@ class _ProfileScreenState extends State<ProfileScreen>
   List<Map<String, dynamic>> _posts = [];
   List<Map<String, dynamic>> _reels = [];
   List<Map<String, dynamic>> _savedPosts = [];
+  List<Map<String, dynamic>> _likedPosts = [];
   bool _isLoading = true;
   int _postsCount = 0;
   int _followersCount = 0;
@@ -34,7 +36,7 @@ class _ProfileScreenState extends State<ProfileScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     _loadAll();
   }
 
@@ -43,6 +45,7 @@ class _ProfileScreenState extends State<ProfileScreen>
     super.didPopNext();
     _loadProfile();
     _loadSavedPosts();
+    _loadLikedPosts();
   }
 
   @override
@@ -82,6 +85,7 @@ class _ProfileScreenState extends State<ProfileScreen>
       _loadPosts(),
       _loadReels(),
       _loadSavedPosts(),
+      _loadLikedPosts(),
     ]);
   }
 
@@ -161,6 +165,43 @@ class _ProfileScreenState extends State<ProfileScreen>
       }
     } catch (e) {
       // Ignore — saved list is non-critical
+    }
+  }
+
+  Future<void> _loadLikedPosts() async {
+    try {
+      final currentUserId = SupabaseService().currentUser?.id;
+      if (currentUserId == null) return;
+
+      final postResponse = await SupabaseService().client
+          .from('post_likes')
+          .select('post_id, posts:posts(*)')
+          .eq('user_id', currentUserId)
+          .order('created_at', ascending: false);
+
+      final likedPosts = (postResponse as List)
+          .where((row) => row['posts'] != null)
+          .map((row) => row['posts'] as Map<String, dynamic>)
+          .toList();
+
+      final reelResponse = await SupabaseService().client
+          .from('reel_likes')
+          .select('reel_id, reels:reels(*)')
+          .eq('user_id', currentUserId)
+          .order('created_at', ascending: false);
+
+      final likedReels = (reelResponse as List)
+          .where((row) => row['reels'] != null)
+          .map((row) => {...(row['reels'] as Map<String, dynamic>), '_isReel': true})
+          .toList();
+
+      if (mounted) {
+        setState(() {
+          _likedPosts = [...likedPosts, ...likedReels];
+        });
+      }
+    } catch (e) {
+      // Ignore — liked list is non-critical
     }
   }
 
@@ -260,6 +301,7 @@ class _ProfileScreenState extends State<ProfileScreen>
                           Tab(icon: SvgPicture.asset('assets/icons/grid_on.svg', width: 24, height: 24)),
                           Tab(icon: SvgPicture.asset('assets/icons/video_library.svg', width: 24, height: 24)),
                           Tab(icon: SvgPicture.asset('assets/icons/bookmark.svg', width: 24, height: 24)),
+                          Tab(icon: SvgPicture.asset('assets/icons/heart.svg', width: 24, height: 24)),
                         ],
                       ),
                     ),
@@ -272,6 +314,7 @@ class _ProfileScreenState extends State<ProfileScreen>
                       _buildPostsGrid(),
                       _buildReelsGrid(),
                       _buildSavedGrid(),
+                      _buildLikedGrid(),
                     ],
                   ),
                 ],
@@ -415,6 +458,144 @@ class _ProfileScreenState extends State<ProfileScreen>
         ],
       ),
     );
+  }
+
+  Widget _buildLikedGrid() {
+    if (_likedPosts.isNotEmpty) {
+      return GridView.builder(
+        padding: const EdgeInsets.all(2),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3,
+          crossAxisSpacing: 2,
+          mainAxisSpacing: 2,
+          childAspectRatio: 1,
+        ),
+        physics: const NeverScrollableScrollPhysics(),
+        shrinkWrap: true,
+        itemCount: _likedPosts.length,
+        itemBuilder: (context, index) {
+          final item = _likedPosts[index];
+          if (item['_isReel'] == true) {
+            return _buildReelGridItem(item);
+          }
+          return _buildGridItem(item);
+        },
+      );
+    }
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SvgPicture.asset(
+            'assets/icons/heart.svg',
+            width: 64,
+            height: 64,
+            colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Nothing liked yet',
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              color: RippleColors.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Posts you like will appear here.',
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: RippleColors.textTertiary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmDeleteGridItem(Map<String, dynamic> item, {bool isReel = false}) {
+    final isOwner = item['user_id'] == SupabaseService().currentUser?.id;
+    if (!isOwner) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Only your own items can be deleted'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: RippleColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
+        ),
+        title: Text(isReel ? 'Delete reel?' : 'Delete post?'),
+        content: const Text(
+          'This cannot be undone. Likes, comments, and saves will be removed.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _onDeleteGridItem(item, isReel: isReel);
+            },
+            child: Text(
+              'Delete',
+              style: TextStyle(color: RippleColors.error),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _onDeleteGridItem(Map<String, dynamic> item, {bool isReel = false}) async {
+    AuthGuard.run(context, onAuthenticated: () async {
+      final currentUserId = SupabaseService().currentUser?.id;
+      if (currentUserId == null) return;
+      try {
+        await SupabaseService().client
+            .from(isReel ? RippleConstants.tableReels : RippleConstants.tablePosts)
+            .delete()
+            .eq('id', item['id'] as String)
+            .eq('user_id', currentUserId);
+
+        if (!isReel) {
+          try {
+            await SupabaseService().client.rpc(
+              'decrement_posts_count',
+              params: {'user_id': currentUserId},
+            );
+          } catch (_) {
+            // Counter is cosmetic
+          }
+        }
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(isReel ? 'Reel deleted' : 'Post deleted'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+          _loadAll();
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to delete item'),
+              backgroundColor: RippleColors.error,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      }
+    }, actionName: 'delete');
   }
 
   Widget _buildPostsGrid() {
@@ -583,6 +764,7 @@ class _ProfileScreenState extends State<ProfileScreen>
 
     return GestureDetector(
       onTap: () => context.go('${RippleConstants.routeFeed}/post/${post['id']}'),
+      onLongPress: () => _confirmDeleteGridItem(post),
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -637,6 +819,7 @@ class _ProfileScreenState extends State<ProfileScreen>
 
     return GestureDetector(
       onTap: () => context.go('${RippleConstants.routeReels}/reel/${reel['id']}'),
+      onLongPress: () => _confirmDeleteGridItem(reel, isReel: true),
       child: Stack(
         fit: StackFit.expand,
         children: [
