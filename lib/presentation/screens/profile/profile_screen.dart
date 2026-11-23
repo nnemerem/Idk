@@ -10,6 +10,7 @@ import 'package:ripple/core/utils/guest_mode.dart';
 import 'package:ripple/core/utils/auth_guard.dart';
 import 'package:ripple/presentation/components/followers_list_sheet.dart';
 import 'package:ripple/presentation/components/update_banner.dart';
+import 'package:ripple/presentation/components/share_sheet.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -928,6 +929,20 @@ class _ProfileScreenState extends State<ProfileScreen>
                   context.go(RippleConstants.routeSettings);
                 },
               ),
+            ListTile(
+              leading: SvgPicture.asset('assets/icons/send.svg', width: 24, height: 24),
+              title: const Text('Share Profile'),
+              onTap: () {
+                Navigator.pop(context);
+                final username = _profile?['username'] as String?;
+                if (username == null || username.isEmpty) return;
+                ShareSheet.show(
+                  context,
+                  link: 'ripple://user/$username',
+                  shareText: 'Check out my profile on Ripple @$username!',
+                );
+              },
+            ),
             ListTile(
               leading: SvgPicture.asset('assets/icons/info.svg', width: 24, height: 24),
               title: const Text('About'),
