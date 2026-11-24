@@ -23,6 +23,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
   Map<String, dynamic>? _reel;
   List<Map<String, dynamic>> _topLevelComments = [];
   Map<String, List<Map<String, dynamic>>> _repliesByParent = {};
+  List<Map<String, dynamic>> _collections = [];
   bool _isSaved = false;
   bool _isLoading = true;
   bool _isLoadingComments = false;
@@ -39,6 +40,18 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
     super.initState();
     _loadReel();
     _loadComments();
+    _loadCollections();
+  }
+
+  Future<void> _loadCollections() async {
+    try {
+      final collections = await SupabaseService().getCollections();
+      if (mounted) {
+        setState(() => _collections = List<Map<String, dynamic>>.from(collections));
+      }
+    } catch (e) {
+      // Collections are non-critical
+    }
   }
 
   @override
@@ -630,6 +643,14 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                   );
                 },
               ),
+              ListTile(
+                leading: SvgPicture.asset('assets/icons/bookmark.svg', width: 24, height: 24),
+                title: const Text('Add to collection'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _showAddToCollectionDialog(itemType: 'reel');
+                },
+              ),
               if (_isOwner)
                 ListTile(
                   leading: SvgPicture.asset(
@@ -650,6 +671,168 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Add to collection
+  // ---------------------------------------------------------------------------
+
+  void _showAddToCollectionDialog({required String itemType}) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        decoration: BoxDecoration(
+          color: RippleColors.surface,
+          borderRadius: const BorderRadius.vertical(
+            top: Radius.circular(RippleConstants.borderRadiusXLarge),
+          ),
+        ),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(
+                color: RippleColors.divider,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const Text(
+              'Save to collection',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: RippleColors.textPrimary,
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (_collections.isEmpty) ...[
+              const Text(
+                'No collections yet. Create one from your profile.',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: RippleColors.textTertiary,
+                ),
+              ),
+              const SizedBox(height: 16),
+              ListTile(
+                leading: const Icon(
+                  Icons.add,
+                  color: RippleColors.primary,
+                  size: 20,
+                ),
+                title: const Text('New Collection'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showCreateCollectionDialog();
+                },
+              ),
+            ] else ...[
+              ..._collections.map((collection) {
+                return ListTile(
+                  leading: const Icon(
+                    Icons.bookmark,
+                    color: RippleColors.textSecondary,
+                    size: 22,
+                  ),
+                  title: Text(
+                    collection['name'] ?? 'Collection',
+                    style: TextStyle(
+                      color: RippleColors.textPrimary,
+                      fontSize: 15,
+                    ),
+                  ),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await SupabaseService().addToCollection(
+                      collectionId: collection['id'] as String,
+                      postId: itemType == 'post' ? widget.reelId : null,
+                      reelId: itemType == 'reel' ? widget.reelId : null,
+                    );
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Saved to collection'),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    }
+                  },
+                );
+              }).toList(),
+              const Divider(color: RippleColors.divider),
+              ListTile(
+                leading: const Icon(
+                  Icons.add,
+                  color: RippleColors.primary,
+                  size: 20,
+                ),
+                title: const Text('New Collection'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showCreateCollectionDialog();
+                },
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Show a create-collection dialog (reused from profile screen pattern)
+  void _showCreateCollectionDialog() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: RippleColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
+        ),
+        title: const Text('New Collection'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(color: RippleColors.textPrimary),
+          decoration: InputDecoration(
+            hintText: 'Collection name',
+            hintStyle: TextStyle(color: RippleColors.textTertiary),
+            border: const UnderlineInputBorder(),
+            contentPadding: const EdgeInsets.symmetric(vertical: 8),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () async {
+              final name = controller.text.trim();
+              if (name.isEmpty) return;
+              Navigator.pop(context);
+              final id = await SupabaseService().createCollection(name);
+              if (id != null && mounted) {
+                setState(() {
+                  _collections.insert(0, {
+                    'id': id,
+                    'name': name,
+                    'user_id': SupabaseService().currentUser?.id,
+                    'created_at': DateTime.now().toIso8601String(),
+                  });
+                });
+              }
+            },
+            child: const Text('Create'),
+          ),
+        ],
       ),
     );
   }
