@@ -807,7 +807,6 @@ class _ProfileScreenState extends State<ProfileScreen>
   }
 
   Widget _buildSavedGrid() {
-    final currentUserId = SupabaseService().currentUser?.id;
     final isGuest = GuestMode.isGuestMode;
 
     if (isGuest) {
