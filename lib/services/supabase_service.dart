@@ -336,12 +336,11 @@ class SupabaseService {
     final base = client
         .from(RippleConstants.tablePostComments)
         .select('*, user:profiles(username, display_name, avatar_url)')
-        .eq('post_id', postId)
-        .order('created_at', ascending: false);
+        .eq('post_id', postId);
 
     final response = parentId == null
-        ? await base.isNull('parent_id')
-        : await base.eq('parent_id', parentId);
+        ? await base.isNull('parent_id').order('created_at', ascending: false)
+        : await base.eq('parent_id', parentId).order('created_at', ascending: false);
 
     return List<Map<String, dynamic>>.from(response);
   }
@@ -431,12 +430,11 @@ class SupabaseService {
     final base = client
         .from(RippleConstants.tableReelComments)
         .select('*, user:profiles(username, display_name, avatar_url)')
-        .eq('reel_id', reelId)
-        .order('created_at', ascending: false);
+        .eq('reel_id', reelId);
 
     final response = parentId == null
-        ? await base.isNull('parent_id')
-        : await base.eq('parent_id', parentId);
+        ? await base.isNull('parent_id').order('created_at', ascending: false)
+        : await base.eq('parent_id', parentId).order('created_at', ascending: false);
 
     return List<Map<String, dynamic>>.from(response);
   }
