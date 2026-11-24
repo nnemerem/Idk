@@ -1168,7 +1168,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                                   BlendMode.srcIn,
                                 ),
                               ),
-                              if (_commentLikeCounts[commentId ?? ''] ?? 0 > 0) ...[
+                              if ((_commentLikeCounts[commentId ?? ''] ?? 0) > 0) ...[
                                 const SizedBox(width: 4),
                                 Text(
                                   '${_commentLikeCounts[commentId ?? ''] ?? 0}',

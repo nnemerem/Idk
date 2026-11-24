@@ -639,8 +639,9 @@ class SupabaseService {
   Future<int> getPostCommentLikesCount(String commentId) async {
     final response = await client
         .from(RippleConstants.tablePostCommentLikes)
-        .select('id', count: CountOption.exact)
-        .eq('post_comment_id', commentId);
+        .select('id')
+        .eq('post_comment_id', commentId)
+        .count(CountOption.exact);
     return response.count;
   }
 
@@ -680,8 +681,9 @@ class SupabaseService {
   Future<int> getReelCommentLikesCount(String commentId) async {
     final response = await client
         .from(RippleConstants.tableReelCommentLikes)
-        .select('id', count: CountOption.exact)
-        .eq('reel_comment_id', commentId);
+        .select('id')
+        .eq('reel_comment_id', commentId)
+        .count(CountOption.exact);
     return response.count;
   }
 }
