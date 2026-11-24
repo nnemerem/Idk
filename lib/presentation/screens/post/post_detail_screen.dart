@@ -897,11 +897,10 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
               ),
             ] else ...[
               ..._collections.map((collection) {
-                final alreadySaved = _savedPosts.any((s) => s['id'] == widget.postId);
                 return ListTile(
-                  leading: Icon(
+                  leading: const Icon(
                     Icons.bookmark,
-                    color: alreadySaved ? RippleColors.primary : RippleColors.textSecondary,
+                    color: RippleColors.textSecondary,
                     size: 22,
                   ),
                   title: Text(
@@ -911,9 +910,6 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                       fontSize: 15,
                     ),
                   ),
-                  trailing: alreadySaved
-                      ? const Icon(Icons.check, color: RippleColors.primary, size: 20)
-                      : null,
                   onTap: () async {
                     Navigator.pop(context);
                     await SupabaseService().addToCollection(
