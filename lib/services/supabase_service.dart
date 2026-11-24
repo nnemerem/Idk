@@ -320,4 +320,282 @@ class SupabaseService {
 
     return response.count;
   }
+
+  // ---------------------------------------------------------------------------
+  // Comment replies (threaded comments)
+  // ---------------------------------------------------------------------------
+
+  /// Fetch comments for a post.
+  ///
+  /// When [parentId] is null only top-level comments are returned.
+  /// When [parentId] is set only the replies to that comment are returned.
+  Future<List<Map<String, dynamic>>> getPostComments(
+    String postId, {
+    String? parentId,
+  }) async {
+    final base = client
+        .from(RippleConstants.tablePostComments)
+        .select('*, user:profiles(username, display_name, avatar_url)')
+        .eq('post_id', postId)
+        .order('created_at', ascending: false);
+
+    final response = parentId == null
+        ? await base.isNull('parent_id')
+        : await base.eq('parent_id', parentId);
+
+    return List<Map<String, dynamic>>.from(response);
+  }
+
+  /// Create a comment on a post, optionally as a reply to [parentId].
+  Future<void> createPostComment({
+    required String postId,
+    required String content,
+    String? parentId,
+  }) async {
+    final currentUserId = currentUser!.id;
+    await client.from(RippleConstants.tablePostComments).insert({
+      'post_id': postId,
+      'user_id': currentUserId,
+      'content': content,
+      'parent_id': parentId,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+
+    // Notify the post owner (and the parent comment author for replies)
+    // best effort — never breaks the action
+    try {
+      final post = await client
+          .from(RippleConstants.tablePosts)
+          .select('user_id')
+          .eq('id', postId)
+          .maybeSingle();
+      final postOwnerId = post?['user_id'] as String?;
+      if (postOwnerId != null && postOwnerId != currentUserId) {
+        final myProfile = await getProfile(currentUserId);
+        final myUsername = myProfile?['username'] as String?;
+        if (myUsername != null) {
+          await createNotification(
+            targetUserId: postOwnerId,
+            type: 'post_comment',
+            title: '@$myUsername',
+            body: parentId == null
+                ? 'commented on your post'
+                : 'replied to your comment',
+            data: {
+              'actor_id': currentUserId,
+              'post_id': postId,
+              'parent_id': parentId,
+            },
+          );
+        }
+      }
+      if (parentId != null && parentId != currentUserId) {
+        final parent = await client
+            .from(RippleConstants.tablePostComments)
+            .select('user_id')
+            .eq('id', parentId)
+            .maybeSingle();
+        final parentAuthorId = parent?['user_id'] as String?;
+        if (parentAuthorId != null && parentAuthorId != currentUserId &&
+            parentAuthorId != postOwnerId) {
+          final myProfile = await getProfile(currentUserId);
+          final myUsername = myProfile?['username'] as String?;
+          if (myUsername != null) {
+            await createNotification(
+              targetUserId: parentAuthorId,
+              type: 'post_comment',
+              title: '@$myUsername',
+              body: 'replied to your comment',
+              data: {
+                'actor_id': currentUserId,
+                'post_id': postId,
+                'parent_id': parentId,
+              },
+            );
+          }
+        }
+      }
+    } catch (e) {
+      // Notification failures are non-fatal
+    }
+  }
+
+  /// Fetch comments for a reel.
+  ///
+  /// When [parentId] is null only top-level comments are returned.
+  /// When [parentId] is set only the replies to that comment are returned.
+  Future<List<Map<String, dynamic>>> getReelComments(
+    String reelId, {
+    String? parentId,
+  }) async {
+    final base = client
+        .from(RippleConstants.tableReelComments)
+        .select('*, user:profiles(username, display_name, avatar_url)')
+        .eq('reel_id', reelId)
+        .order('created_at', ascending: false);
+
+    final response = parentId == null
+        ? await base.isNull('parent_id')
+        : await base.eq('parent_id', parentId);
+
+    return List<Map<String, dynamic>>.from(response);
+  }
+
+  /// Create a comment on a reel, optionally as a reply to [parentId].
+  Future<void> createReelComment({
+    required String reelId,
+    required String content,
+    String? parentId,
+  }) async {
+    final currentUserId = currentUser!.id;
+    await client.from(RippleConstants.tableReelComments).insert({
+      'reel_id': reelId,
+      'user_id': currentUserId,
+      'content': content,
+      'parent_id': parentId,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+
+    try {
+      final reel = await client
+          .from(RippleConstants.tableReels)
+          .select('user_id')
+          .eq('id', reelId)
+          .maybeSingle();
+      final reelOwnerId = reel?['user_id'] as String?;
+      if (reelOwnerId != null && reelOwnerId != currentUserId) {
+        final myProfile = await getProfile(currentUserId);
+        final myUsername = myProfile?['username'] as String?;
+        if (myUsername != null) {
+          await createNotification(
+            targetUserId: reelOwnerId,
+            type: 'reel_comment',
+            title: '@$myUsername',
+            body: parentId == null
+                ? 'commented on your reel'
+                : 'replied to your comment',
+            data: {
+              'actor_id': currentUserId,
+              'reel_id': reelId,
+              'parent_id': parentId,
+            },
+          );
+        }
+      }
+      if (parentId != null && parentId != currentUserId) {
+        final parent = await client
+            .from(RippleConstants.tableReelComments)
+            .select('user_id')
+            .eq('id', parentId)
+            .maybeSingle();
+        final parentAuthorId = parent?['user_id'] as String?;
+        if (parentAuthorId != null && parentAuthorId != currentUserId &&
+            parentAuthorId != reelOwnerId) {
+          final myProfile = await getProfile(currentUserId);
+          final myUsername = myProfile?['username'] as String?;
+          if (myUsername != null) {
+            await createNotification(
+              targetUserId: parentAuthorId,
+              type: 'reel_comment',
+              title: '@$myUsername',
+              body: 'replied to your comment',
+              data: {
+                'actor_id': currentUserId,
+                'reel_id': reelId,
+                'parent_id': parentId,
+              },
+            );
+          }
+        }
+      }
+    } catch (e) {
+      // Notification failures are non-fatal
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Saved collections
+  // ---------------------------------------------------------------------------
+
+  /// Create a named collection for the current user.
+  Future<String?> createCollection(String name) async {
+    final currentUserId = currentUser!.id;
+    try {
+      final response = await client
+          .from(RippleConstants.tableSavedCollections)
+          .insert({
+            'user_id': currentUserId,
+            'name': name,
+            'created_at': DateTime.now().toIso8601String(),
+            'updated_at': DateTime.now().toIso8601String(),
+          })
+          .select('id')
+          .single();
+      return response['id'] as String?;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// List the current user's collections.
+  Future<List<Map<String, dynamic>>> getCollections() async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tableSavedCollections)
+        .select()
+        .eq('user_id', currentUserId)
+        .order('updated_at', ascending: false);
+    return List<Map<String, dynamic>>.from(response);
+  }
+
+  /// Add a post or reel to a collection.
+  Future<void> addToCollection({
+    required String collectionId,
+    String? postId,
+    String? reelId,
+  }) async {
+    await client.from(RippleConstants.tableSavedCollectionItems).upsert({
+      'collection_id': collectionId,
+      'post_id': postId,
+      'reel_id': reelId,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+
+    // Touch the collection's updated_at
+    await client
+        .from(RippleConstants.tableSavedCollections)
+        .update({'updated_at': DateTime.now().toIso8601String()})
+        .eq('id', collectionId);
+  }
+
+  /// Remove a post or reel from a collection.
+  Future<void> removeFromCollection({
+    required String collectionId,
+    String? postId,
+    String? reelId,
+  }) async {
+    final query = client
+        .from(RippleConstants.tableSavedCollectionItems)
+        .delete()
+        .eq('collection_id', collectionId);
+
+    if (postId != null) {
+      query.eq('post_id', postId);
+    }
+    if (reelId != null) {
+      query.eq('reel_id', reelId);
+    }
+
+    await query;
+  }
+
+  /// List items in a collection (post or reel rows joined).
+  Future<List<Map<String, dynamic>>> getCollectionItems(String collectionId) async {
+    final response = await client
+        .from(RippleConstants.tableSavedCollectionItems)
+        .select('*, post:posts(id, caption, media, post_type), reel:reels(id, caption, video_url, thumbnail_url)')
+        .eq('collection_id', collectionId)
+        .order('created_at', ascending: false);
+    return List<Map<String, dynamic>>.from(response);
+  }
 }
