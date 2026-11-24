@@ -27,6 +27,9 @@ class _ProfileScreenState extends State<ProfileScreen>
   List<Map<String, dynamic>> _reels = [];
   List<Map<String, dynamic>> _savedPosts = [];
   List<Map<String, dynamic>> _likedPosts = [];
+  List<Map<String, dynamic>> _collections = [];
+  String? _selectedCollectionId; // null = view all saved items
+  Map<String, List<Map<String, dynamic>>> _collectionItems = {};
   bool _isLoading = true;
   int _postsCount = 0;
   int _followersCount = 0;
@@ -92,6 +95,7 @@ class _ProfileScreenState extends State<ProfileScreen>
       _loadReels(),
       _loadSavedPosts(),
       _loadLikedPosts(),
+      _loadCollections(),
     ]);
   }
 
@@ -172,6 +176,98 @@ class _ProfileScreenState extends State<ProfileScreen>
     } catch (e) {
       // Ignore — saved list is non-critical
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Saved collections
+  // ---------------------------------------------------------------------------
+
+  Future<void> _loadCollections() async {
+    try {
+      final collections = await SupabaseService().getCollections();
+      if (mounted) {
+        setState(() => _collections = List<Map<String, dynamic>>.from(collections));
+      }
+    } catch (e) {
+      // Collections are non-critical
+    }
+  }
+
+  /// Open (or close) a specific collection. null = view all saved items.
+  void _selectCollection(String? collectionId) {
+    setState(() => _selectedCollectionId = collectionId);
+    if (collectionId != null) {
+      _loadCollectionItems(collectionId);
+    } else {
+      _collectionItems.remove(collectionId);
+    }
+  }
+
+  /// Load items inside a specific collection.
+  Future<void> _loadCollectionItems(String collectionId) async {
+    try {
+      final items = await SupabaseService().getCollectionItems(collectionId);
+      if (mounted) {
+        setState(() {
+          _collectionItems[collectionId] =
+              List<Map<String, dynamic>>.from(items);
+        });
+      }
+    } catch (e) {
+      // Non-critical
+    }
+  }
+
+  /// Show a dialog to create a new saved collection.
+  void _showCreateCollectionDialog() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: RippleColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
+        ),
+        title: const Text('New Collection'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(color: RippleColors.textPrimary),
+          decoration: InputDecoration(
+            hintText: 'Collection name',
+            hintStyle: TextStyle(color: RippleColors.textTertiary),
+            border: const UnderlineInputBorder(),
+            contentPadding: const EdgeInsets.symmetric(vertical: 8),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () async {
+              final name = controller.text.trim();
+              if (name.isEmpty) return;
+              Navigator.pop(context);
+              final id = await SupabaseService().createCollection(name);
+              if (id != null && mounted) {
+                setState(() {
+                  _collections.insert(0, {
+                    'id': id,
+                    'name': name,
+                    'user_id': SupabaseService().currentUser?.id,
+                    'created_at': DateTime.now().toIso8601String(),
+                  });
+                  _selectCollection(id);
+                });
+              }
+            },
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _loadLikedPosts() async {
@@ -711,27 +807,137 @@ class _ProfileScreenState extends State<ProfileScreen>
   }
 
   Widget _buildSavedGrid() {
-    if (_savedPosts.isNotEmpty) {
-      return GridView.builder(
-        padding: const EdgeInsets.all(2),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 3,
-          crossAxisSpacing: 2,
-          mainAxisSpacing: 2,
-          childAspectRatio: 1,
-        ),
-        physics: const NeverScrollableScrollPhysics(),
-        shrinkWrap: true,
-        itemCount: _savedPosts.length,
-        itemBuilder: (context, index) {
-          final item = _savedPosts[index];
-          if (item['_isReel'] == true) {
-            return _buildReelGridItem(item);
-          }
-          return _buildGridItem(item);
-        },
-      );
+    final currentUserId = SupabaseService().currentUser?.id;
+    final isGuest = GuestMode.isGuestMode;
+
+    if (isGuest) {
+      return _buildGuestSavedEmpty();
     }
+
+    // Items for the currently selected collection (or all saved)
+    final itemsForCollection = _selectedCollectionId == null
+        ? _savedPosts
+        : (_collectionItems[_selectedCollectionId] ?? []);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Collections selector row
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          child: Row(
+            children: [
+              Text(
+                'Collections',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(
+                  Icons.add,
+                  size: 20,
+                  color: RippleColors.primary,
+                ),
+                onPressed: _showCreateCollectionDialog,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                tooltip: 'New collection',
+              ),
+            ],
+          ),
+        ),
+        SizedBox(
+          height: 64,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            itemCount: _collections.length + 1,
+            itemBuilder: (context, index) {
+              final isAll = index == 0;
+              final collection = isAll
+                  ? null
+                  : _collections[index - 1];
+              final isSelected = _selectedCollectionId ==
+                  (isAll ? null : collection!['id']);
+              return GestureDetector(
+                onTap: () => _selectCollection(isAll ? null : collection!['id']),
+                child: Container(
+                  margin: index == 0
+                      ? const EdgeInsets.only(left: 16, right: 8)
+                      : const EdgeInsets.only(right: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? RippleColors.primary.withValues(alpha: 0.15)
+                        : RippleColors.surfaceVariant,
+                    borderRadius: BorderRadius.circular(20),
+                    border: isSelected
+                        ? Border.all(color: RippleColors.primary, width: 1.5)
+                        : null,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!isSelected)
+                        Icon(
+                          Icons.bookmark_border,
+                          size: 16,
+                          color: isSelected
+                              ? RippleColors.primary
+                              : RippleColors.textSecondary,
+                        ),
+                      const SizedBox(width: 6),
+                      Text(
+                        isAll ? 'All Saved' : (collection!['name'] ?? 'Collection'),
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: isSelected
+                              ? RippleColors.primary
+                              : RippleColors.textPrimary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+
+        // Items grid
+        Expanded(
+          child: itemsForCollection.isEmpty
+              ? _buildSavedEmpty(collectionName: _selectedCollectionId == null
+                  ? null
+                  : _collections
+                      .firstWhere((c) => c['id'] == _selectedCollectionId, orElse: () => {})['name'])
+              : GridView.builder(
+                  padding: const EdgeInsets.all(2),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 3,
+                    crossAxisSpacing: 2,
+                    mainAxisSpacing: 2,
+                    childAspectRatio: 1,
+                  ),
+                  physics: const NeverScrollableScrollPhysics(),
+                  shrinkWrap: true,
+                  itemCount: itemsForCollection.length,
+                  itemBuilder: (context, index) {
+                    final item = itemsForCollection[index];
+                    if (item['_isReel'] == true) {
+                      return _buildReelGridItem(item);
+                    }
+                    return _buildGridItem(item);
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGuestSavedEmpty() {
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -744,7 +950,7 @@ class _ProfileScreenState extends State<ProfileScreen>
           ),
           const SizedBox(height: 16),
           Text(
-            'No saved items',
+            'Sign in to save',
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
               color: RippleColors.textSecondary,
             ),
@@ -752,6 +958,40 @@ class _ProfileScreenState extends State<ProfileScreen>
           const SizedBox(height: 8),
           Text(
             'Posts and Reels you save will appear here.',
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: RippleColors.textTertiary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSavedEmpty({String? collectionName}) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SvgPicture.asset(
+            'assets/icons/bookmark.svg',
+            width: 64,
+            height: 64,
+            colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            collectionName != null
+                ? 'No items in "$collectionName"'
+                : 'No saved items',
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              color: RippleColors.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            collectionName != null
+                ? 'Save posts and Reels to this collection.'
+                : 'Posts and Reels you save will appear here.',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               color: RippleColors.textTertiary,
             ),
