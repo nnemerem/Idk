@@ -598,4 +598,90 @@ class SupabaseService {
         .order('created_at', ascending: false);
     return List<Map<String, dynamic>>.from(response);
   }
+
+  // ---------------------------------------------------------------------------
+  // Comment likes
+  // ---------------------------------------------------------------------------
+
+  /// Like a post comment. No-op if already liked.
+  Future<void> likePostComment(String commentId) async {
+    final currentUserId = currentUser!.id;
+    await client.from(RippleConstants.tablePostCommentLikes).insert({
+      'post_comment_id': commentId,
+      'user_id': currentUserId,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+  }
+
+  /// Unlike a post comment. No-op if not liked.
+  Future<void> unlikePostComment(String commentId) async {
+    final currentUserId = currentUser!.id;
+    await client
+        .from(RippleConstants.tablePostCommentLikes)
+        .delete()
+        .eq('post_comment_id', commentId)
+        .eq('user_id', currentUserId);
+  }
+
+  /// Whether the current user has liked a post comment.
+  Future<bool> isPostCommentLiked(String commentId) async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tablePostCommentLikes)
+        .select('id')
+        .eq('post_comment_id', commentId)
+        .eq('user_id', currentUserId)
+        .maybeSingle();
+    return response != null;
+  }
+
+  /// Like count for a post comment.
+  Future<int> getPostCommentLikesCount(String commentId) async {
+    final response = await client
+        .from(RippleConstants.tablePostCommentLikes)
+        .select('id', count: CountOption.exact)
+        .eq('post_comment_id', commentId);
+    return response.count;
+  }
+
+  /// Like a reel comment. No-op if already liked.
+  Future<void> likeReelComment(String commentId) async {
+    final currentUserId = currentUser!.id;
+    await client.from(RippleConstants.tableReelCommentLikes).insert({
+      'reel_comment_id': commentId,
+      'user_id': currentUserId,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+  }
+
+  /// Unlike a reel comment. No-op if not liked.
+  Future<void> unlikeReelComment(String commentId) async {
+    final currentUserId = currentUser!.id;
+    await client
+        .from(RippleConstants.tableReelCommentLikes)
+        .delete()
+        .eq('reel_comment_id', commentId)
+        .eq('user_id', currentUserId);
+  }
+
+  /// Whether the current user has liked a reel comment.
+  Future<bool> isReelCommentLiked(String commentId) async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tableReelCommentLikes)
+        .select('id')
+        .eq('reel_comment_id', commentId)
+        .eq('user_id', currentUserId)
+        .maybeSingle();
+    return response != null;
+  }
+
+  /// Like count for a reel comment.
+  Future<int> getReelCommentLikesCount(String commentId) async {
+    final response = await client
+        .from(RippleConstants.tableReelCommentLikes)
+        .select('id', count: CountOption.exact)
+        .eq('reel_comment_id', commentId);
+    return response.count;
+  }
 }

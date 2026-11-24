@@ -25,6 +25,8 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
   List<Map<String, dynamic>> _topLevelComments = [];
   Map<String, List<Map<String, dynamic>>> _repliesByParent = {};
   List<Map<String, dynamic>> _collections = [];
+  Map<String, bool> _commentLikeStatus = {};   // commentId -> isLiked
+  Map<String, int> _commentLikeCounts = {};    // commentId -> like count
   bool _isLoading = true;
   bool _isLoadingComments = false;
   bool _isSaved = false;
@@ -137,10 +139,91 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
           _repliesByParent = repliesByParent;
           _isLoadingComments = false;
         });
+        _loadCommentLikes();
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isLoadingComments = false);
+      }
+    }
+  }
+
+  /// Load like status and counts for all comments (top-level + replies).
+  Future<void> _loadCommentLikes() async {
+    final currentUserId = SupabaseService().currentUser?.id;
+    if (currentUserId == null) return;
+
+    // Collect all comment ids
+    final allIds = <String>[];
+    for (final c in _topLevelComments) {
+      final id = c['id'];
+      if (id != null) allIds.add(id);
+    }
+    for (final replies in _repliesByParent.values) {
+      for (final c in replies) {
+        final id = c['id'];
+        if (id != null) allIds.add(id);
+      }
+    }
+
+    final likeStatus = <String, bool>{};
+    final likeCounts = <String, int>{};
+
+    for (final id in allIds) {
+      try {
+        final liked = await SupabaseService().isPostCommentLiked(id);
+        final count = await SupabaseService().getPostCommentLikesCount(id);
+        likeStatus[id] = liked;
+        likeCounts[id] = count;
+      } catch (_) {
+        likeStatus[id] = false;
+        likeCounts[id] = 0;
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _commentLikeStatus = likeStatus;
+        _commentLikeCounts = likeCounts;
+      });
+    }
+  }
+
+  /// Toggle like on a post comment.
+  Future<void> _toggleCommentLike(String commentId) async {
+    final currentlyLiked = _commentLikeStatus[commentId] == true;
+    final currentCount = _commentLikeCounts[commentId] ?? 0;
+
+    // Optimistic update
+    setState(() {
+      _commentLikeStatus[commentId] = !currentlyLiked;
+      _commentLikeCounts[commentId] = currentlyLiked
+          ? (currentCount - 1).clamp(0, 1000000)
+          : currentCount + 1;
+    });
+
+    try {
+      if (currentlyLiked) {
+        await SupabaseService().unlikePostComment(commentId);
+      } else {
+        await SupabaseService().likePostComment(commentId);
+      }
+      // Refresh to get authoritative state
+      _loadCommentLikes();
+    } catch (e) {
+      // Revert optimistic update on failure
+      setState(() {
+        _commentLikeStatus[commentId] = currentlyLiked;
+        _commentLikeCounts[commentId] = currentCount;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to ${currentlyLiked ? 'unlike' : 'like'} comment'),
+            backgroundColor: RippleColors.error,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
       }
     }
   }
@@ -1134,6 +1217,43 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                               fontWeight: FontWeight.w600,
                               fontSize: 13,
                             ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        GestureDetector(
+                          onTap: () {
+                            final id = commentId;
+                            if (id == null) return;
+                            _toggleCommentLike(id);
+                          },
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SvgPicture.asset(
+                                _commentLikeStatus[commentId ?? ''] == true
+                                    ? 'assets/icons/heart_filled.svg'
+                                    : 'assets/icons/heart.svg',
+                                width: 16,
+                                height: 16,
+                                colorFilter: ColorFilter.mode(
+                                  _commentLikeStatus[commentId ?? ''] == true
+                                      ? RippleColors.error
+                                      : RippleColors.textSecondary,
+                                  BlendMode.srcIn,
+                                ),
+                              ),
+                              if (_commentLikeCounts[commentId ?? ''] ?? 0 > 0) ...[
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${_commentLikeCounts[commentId ?? ''] ?? 0}',
+                                  style: TextStyle(
+                                    color: RippleColors.textSecondary,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ],
                           ),
                         ),
                       ],
