@@ -22,13 +22,16 @@ class PostDetailScreen extends StatefulWidget {
 
 class _PostDetailScreenState extends State<PostDetailScreen> {
   Map<String, dynamic>? _post;
-  List<Map<String, dynamic>> _comments = [];
+  List<Map<String, dynamic>> _topLevelComments = [];
+  Map<String, List<Map<String, dynamic>>> _repliesByParent = {};
   bool _isLoading = true;
   bool _isLoadingComments = false;
   bool _isSaved = false;
   final TextEditingController _commentController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   bool _showAllComments = false;
+  String? _replyingTo; // comment id whose reply input is open
+  final Map<String, TextEditingController> _replyControllers = {};
 
   @override
   void initState() {
@@ -41,6 +44,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
   void dispose() {
     _commentController.dispose();
     _scrollController.dispose();
+    for (final c in _replyControllers.values) c.dispose();
     super.dispose();
   }
 
@@ -104,9 +108,20 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
           .eq('post_id', widget.postId)
           .order('created_at', ascending: true);
 
+      final all = List<Map<String, dynamic>>.from(response);
+      final topLevel = all.where((c) => c['parent_id'] == null).toList();
+      final repliesByParent = <String, List<Map<String, dynamic>>>{};
+      for (final c in all) {
+        final pid = c['parent_id'];
+        if (pid != null) {
+          repliesByParent.putIfAbsent(pid, () => []).add(c);
+        }
+      }
+
       if (mounted) {
         setState(() {
-          _comments = List<Map<String, dynamic>>.from(response);
+          _topLevelComments = topLevel;
+          _repliesByParent = repliesByParent;
           _isLoadingComments = false;
         });
       }
@@ -117,41 +132,23 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     }
   }
 
-  Future<void> _addComment() async {
+  Future<void> _addComment({String? parentId}) async {
     final content = _commentController.text.trim();
     if (content.isEmpty) return;
 
     AuthGuard.run(context, onAuthenticated: () async {
       try {
-        final currentUserId = SupabaseService().currentUser!.id;
-        await SupabaseService().client.from(RippleConstants.tablePostComments).insert({
-          'post_id': widget.postId,
-          'user_id': currentUserId,
-          'content': content,
-          'created_at': DateTime.now().toIso8601String(),
-        });
-
-        // Notify the post owner (skip self-comments)
-        final ownerId = _post?['user_id'] as String?;
-        if (ownerId != null && ownerId != currentUserId) {
-          try {
-            final myProfile = await SupabaseService().getProfile(currentUserId);
-            final myUsername = myProfile?['username'] as String?;
-            if (myUsername != null) {
-              await SupabaseService().createNotification(
-                targetUserId: ownerId,
-                type: 'post_comment',
-                title: '@$myUsername',
-                body: 'commented: "$content"',
-                data: {'actor_id': currentUserId, 'post_id': widget.postId},
-              );
-            }
-          } catch (_) {
-            // Notification is best effort
-          }
-        }
+        await SupabaseService().createPostComment(
+          postId: widget.postId,
+          content: content,
+          parentId: parentId,
+        );
 
         _commentController.clear();
+        if (parentId != null) {
+          setState(() => _replyingTo = null);
+          _replyControllers.remove(parentId)?.dispose();
+        }
         _loadComments();
       } catch (e) {
         if (mounted) {
@@ -284,7 +281,8 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     if (comments is Map && comments['count'] != null) {
       return comments['count'] as int;
     }
-    return _comments.length;
+    return _topLevelComments.length +
+        _repliesByParent.values.expand((r) => r).length;
   }
 
   bool _getIsLiked() {
@@ -427,7 +425,7 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                 Expanded(
                   child: _isLoadingComments
                       ? Center(child: CircularProgressIndicator(color: RippleColors.primary))
-                      : _comments.isEmpty
+                      : _topLevelComments.isEmpty
                           ? Center(
                               child: Text(
                                 'No comments yet',
@@ -438,9 +436,9 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                             )
                           : ListView.builder(
                               padding: const EdgeInsets.all(16),
-                              itemCount: _comments.length,
+                              itemCount: _topLevelComments.length,
                               itemBuilder: (context, index) {
-                                final comment = _comments[index];
+                                final comment = _topLevelComments[index];
                                 final commentProfile = comment['profiles'] as Map<String, dynamic>?;
                                 return _buildComment(comment, commentProfile);
                               },
@@ -877,64 +875,164 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     );
   }
 
-  Widget _buildComment(Map<String, dynamic> comment, Map<String, dynamic>? profile) {
+  Widget _buildComment(Map<String, dynamic> comment, Map<String, dynamic>? profile,
+      {bool isReply = false}) {
     final content = comment['content'] as String?;
     final createdAt = comment['created_at'] as String?;
+    final commentId = comment['id'] as String?;
+    final isReplyingToThis = _replyingTo == commentId;
+    final replyController =
+        _replyControllers[commentId ?? ''];
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Row(
+      padding: EdgeInsets.only(
+        bottom: 12,
+        left: isReply ? 56 : 0,
+      ),
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          CircleAvatar(
-            radius: 16,
-            backgroundColor: RippleColors.surfaceVariant,
-            backgroundImage: profile?['avatar_url'] != null
-                ? CachedNetworkImageProvider(profile!['avatar_url'])
-                : null,
-            child: profile?['avatar_url'] == null
-                ? Text(
-                    profile?['username']?[0]?.toUpperCase() ?? '?',
-                    style: const TextStyle(color: RippleColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 11),
-                  )
-                : null,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CircleAvatar(
+                radius: 16,
+                backgroundColor: RippleColors.surfaceVariant,
+                backgroundImage: profile?['avatar_url'] != null
+                    ? CachedNetworkImageProvider(profile!['avatar_url'])
+                    : null,
+                child: profile?['avatar_url'] == null
+                    ? Text(
+                        profile?['username']?[0]?.toUpperCase() ?? '?',
+                        style: const TextStyle(color: RippleColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 11),
+                      )
+                    : null,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    GestureDetector(
-                      onTap: () {
-                        if (profile?['username'] != null) {
-                          context.go('/user/${profile!['username']}');
-                        }
-                      },
-                      child: Text(
-                        profile?['username'] ?? 'Unknown',
-                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    if (createdAt != null)
-                      Text(
-                        _formatTimestamp(createdAt),
-                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                          color: RippleColors.textTertiary,
+                    Row(
+                      children: [
+                        GestureDetector(
+                          onTap: () {
+                            if (profile?['username'] != null) {
+                              context.go('/user/${profile!['username']}');
+                            }
+                          },
+                          child: Text(
+                            profile?['username'] ?? 'Unknown',
+                            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                          ),
                         ),
-                      ),
+                        const SizedBox(width: 8),
+                        if (createdAt != null)
+                          Text(
+                            _formatTimestamp(createdAt),
+                            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                              color: RippleColors.textTertiary,
+                            ),
+                          ),
+                        const Spacer(),
+                        GestureDetector(
+                          onTap: () {
+                            final id = commentId;
+                            if (id == null) return;
+                            setState(() {
+                              _replyingTo = id;
+                              _replyControllers.putIfAbsent(id, () => TextEditingController());
+                            });
+                          },
+                          child: Text(
+                            'Reply',
+                            style: TextStyle(
+                              color: RippleColors.primary,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      content ?? '',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
                   ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  content ?? '',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
+          if (isReplyingToThis && commentId != null) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: RippleColors.surfaceVariant,
+                borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
+              ),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 14,
+                    backgroundColor: RippleColors.surfaceVariant,
+                    backgroundImage: SupabaseService().currentUser?.userMetadata?['avatar_url'] != null
+                        ? CachedNetworkImageProvider(
+                            SupabaseService().currentUser!.userMetadata!['avatar_url'])
+                        : null,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: replyController,
+                      style: const TextStyle(color: RippleColors.textPrimary, fontSize: 13),
+                      decoration: InputDecoration(
+                        hintText: 'Reply...',
+                        hintStyle: TextStyle(color: RippleColors.textTertiary, fontSize: 13),
+                        border: InputBorder.none,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                      onSubmitted: (_) => _addComment(parentId: commentId),
+                    ),
+                  ),
+                  IconButton(
+                    icon: SvgPicture.asset(
+                      'assets/icons/send.svg',
+                      width: 20,
+                      height: 20,
+                      colorFilter: ColorFilter.mode(RippleColors.primary, BlendMode.srcIn),
+                    ),
+                    onPressed: () => _addComment(parentId: commentId),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 20, color: RippleColors.textTertiary),
+                    onPressed: () {
+                      setState(() {
+                        _replyControllers[commentId]?.dispose();
+                        _replyControllers.remove(commentId);
+                        _replyingTo = null;
+                      });
+                    },
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          // Nested replies
+          if (commentId != null) ...[
+            for (final reply in _repliesByParent[commentId] ?? [])
+              _buildComment(
+                reply,
+                reply['profiles'] as Map<String, dynamic>?,
+                isReply: true,
+              ),
+          ],
         ],
       ),
     );
