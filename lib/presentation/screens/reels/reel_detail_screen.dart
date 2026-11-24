@@ -144,6 +144,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
           _repliesByParent = repliesByParent;
           _isLoadingComments = false;
         });
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _isLoadingComments = false);
