@@ -7,7 +7,8 @@ class RippleColors {
   static const Color surfaceVariant = Color(0xFF1A1A1A);
   static const Color surfaceElevated = Color(0xFF242424);
 
-  // Brand colors - Amber → Copper → Rose gradient (unique signature)
+  // Brand colors - Tungsten Green → Amber → Copper → Rose gradient (unique signature)
+  static const Color tungstenGreen = Color(0xFF22FF44);   // Terminal green from tungsten.no-group.org
   static const Color primary = Color(0xFFFF6B35);     // Vibrant amber-orange
   static const Color primaryLight = Color(0xFFFF8C42);
   static const Color primaryDark = Color(0xFFE85D04);
@@ -17,8 +18,9 @@ class RippleColors {
   static const Color accent = Color(0xFFE85D04);      // Rich copper-orange
   static const Color rose = Color(0xFFE94D6A);        // Soft rose accent
 
-  // Gradient stops for Ripple brand gradient (Amber → Copper → Rose)
+  // Gradient stops for Ripple brand gradient (Tungsten Green → Amber → Copper → Rose)
   static const List<Color> brandGradient = [
+    Color(0xFF22FF44),  // Tungsten green (terminal green)
     Color(0xFFFF6B35),  // Vibrant amber
     Color(0xFFFF8C42),  // Light amber
     Color(0xFFE85D04),  // Copper-orange
@@ -45,10 +47,12 @@ class RippleColors {
 
   // Story ring gradient (uses brand gradient)
   static const List<Color> storyRingGradient = [
+    Color(0xFF22FF44),  // Tungsten green
     Color(0xFFFF6B35),
     Color(0xFFFF8C42),
     Color(0xFFE85D04),
     Color(0xFFD4A574),
+    Color(0xFFC97B4A),
     Color(0xFFE94D6A),
     Color(0xFFD63A5E),
   ];
