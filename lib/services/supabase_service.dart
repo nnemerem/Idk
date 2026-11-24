@@ -333,16 +333,17 @@ class SupabaseService {
     String postId, {
     String? parentId,
   }) async {
-    final base = client
+    final response = await client
         .from(RippleConstants.tablePostComments)
         .select('*, user:profiles(username, display_name, avatar_url)')
-        .eq('post_id', postId);
+        .eq('post_id', postId)
+        .order('created_at', ascending: false);
 
-    final response = parentId == null
-        ? await base.isNull('parent_id').order('created_at', ascending: false)
-        : await base.eq('parent_id', parentId).order('created_at', ascending: false);
-
-    return List<Map<String, dynamic>>.from(response);
+    final all = List<Map<String, dynamic>>.from(response);
+    if (parentId == null) {
+      return all.where((c) => c['parent_id'] == null).toList();
+    }
+    return all.where((c) => c['parent_id'] == parentId).toList();
   }
 
   /// Create a comment on a post, optionally as a reply to [parentId].
@@ -427,16 +428,17 @@ class SupabaseService {
     String reelId, {
     String? parentId,
   }) async {
-    final base = client
+    final response = await client
         .from(RippleConstants.tableReelComments)
         .select('*, user:profiles(username, display_name, avatar_url)')
-        .eq('reel_id', reelId);
+        .eq('reel_id', reelId)
+        .order('created_at', ascending: false);
 
-    final response = parentId == null
-        ? await base.isNull('parent_id').order('created_at', ascending: false)
-        : await base.eq('parent_id', parentId).order('created_at', ascending: false);
-
-    return List<Map<String, dynamic>>.from(response);
+    final all = List<Map<String, dynamic>>.from(response);
+    if (parentId == null) {
+      return all.where((c) => c['parent_id'] == null).toList();
+    }
+    return all.where((c) => c['parent_id'] == parentId).toList();
   }
 
   /// Create a comment on a reel, optionally as a reply to [parentId].
