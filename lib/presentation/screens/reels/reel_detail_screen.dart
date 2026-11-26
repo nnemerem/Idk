@@ -11,6 +11,12 @@ import 'package:ripple/services/supabase_service.dart';
 import 'package:ripple/core/utils/auth_guard.dart';
 import 'package:ripple/presentation/components/share_sheet.dart';
 
+/// Curated emoji set for comment reactions (Instagram-parity picker).
+const List<String> _reactionEmojis = [
+  '❤️','😂','😍','😮','😢','😡','👍','👎','🔥','😎','🤔','🎉','🙌',
+  '💯','🥺','😴','🤩','😘','😱','🤯','🤬','😅','😉','🙏','💪','🎊',
+];
+
 class ReelDetailScreen extends StatefulWidget {
   final String reelId;
 
@@ -28,6 +34,8 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
   Map<String, bool> _commentLikeStatus = {};
   Map<String, int> _commentLikeCounts = {};
   Map<String, bool> _commentPinnedStatus = {};
+  Map<String, Map<String, int>> _commentReactions = {}; // commentId -> emoji -> count
+  Map<String, String?> _commentUserReaction = {}; // commentId -> user's emoji (or null)
   bool _isReposted = false;
   int _repostCount = 0;
   bool _isSaved = false;
@@ -48,6 +56,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
     _loadComments();
     _loadCollections();
     _loadReposts();
+    _loadCommentReactions();
   }
 
   Future<void> _loadReposts() async {
@@ -343,6 +352,170 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
         );
       }
     }
+  }
+
+  /// Load emoji reactions for all comments (top-level + replies).
+  Future<void> _loadCommentReactions() async {
+    final currentUserId = SupabaseService().currentUser?.id;
+    if (currentUserId == null) return;
+
+    final allIds = <String>[];
+    for (final c in _topLevelComments) {
+      final id = c['id'];
+      if (id != null) allIds.add(id);
+    }
+    for (final replies in _repliesByParent.values) {
+      for (final c in replies) {
+        final id = c['id'];
+        if (id != null) allIds.add(id);
+      }
+    }
+
+    final reactions = <String, Map<String, int>>{};
+    final userReaction = <String, String?>{};
+
+    for (final id in allIds) {
+      try {
+        final data = await SupabaseService().getReelCommentReactions(id);
+        reactions[id] = (data['reactions'] as Map?)?.cast<String, int>() ?? {};
+        userReaction[id] = data['userReaction'] as String?;
+      } catch (_) {
+        reactions[id] = {};
+        userReaction[id] = null;
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _commentReactions = reactions;
+        _commentUserReaction = userReaction;
+      });
+    }
+  }
+
+  /// Add, replace, or remove the current user's emoji reaction on a comment.
+  Future<void> _toggleCommentReaction(String commentId, String emoji) async {
+    final currentUserReaction = _commentUserReaction[commentId];
+    final reactions = Map<String, int>.from(_commentReactions[commentId] ?? {});
+
+    if (currentUserReaction == emoji) {
+      reactions[emoji] = (reactions[emoji] ?? 1) - 1;
+      if (reactions[emoji]! <= 0) reactions.remove(emoji);
+      setState(() {
+        _commentReactions[commentId] = reactions;
+        _commentUserReaction[commentId] = null;
+      });
+      try {
+        await SupabaseService().removeReelCommentReaction(commentId);
+        _loadCommentReactions();
+      } catch (_) {
+        setState(() {
+          _commentUserReaction[commentId] = emoji;
+          reactions[emoji] = (reactions[emoji] ?? 0) + 1;
+          _commentReactions[commentId] = reactions;
+        });
+      }
+    } else {
+      final previous = currentUserReaction;
+      if (previous != null) {
+        reactions[previous] = (reactions[previous] ?? 1) - 1;
+        if (reactions[previous]! <= 0) reactions.remove(previous);
+      }
+      reactions[emoji] = (reactions[emoji] ?? 0) + 1;
+      setState(() {
+        _commentReactions[commentId] = reactions;
+        _commentUserReaction[commentId] = emoji;
+      });
+      try {
+        await SupabaseService().addReelCommentReaction(commentId, emoji);
+        _loadCommentReactions();
+      } catch (_) {
+        setState(() {
+          _commentUserReaction[commentId] = previous;
+          reactions[emoji] = (reactions[emoji] ?? 1) - 1;
+          if (reactions[emoji]! <= 0) reactions.remove(emoji);
+          if (previous != null) {
+            reactions[previous] = (reactions[previous] ?? 0) + 1;
+          }
+          _commentReactions[commentId] = reactions;
+        });
+      }
+    }
+  }
+
+  /// Show the emoji picker for a comment.
+  Future<void> _showEmojiPicker(String commentId) async {
+    final currentReaction = _commentUserReaction[commentId];
+    await showDialog<String?>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: RippleColors.surfaceElevated,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: const Text(
+            'React to comment',
+            style: TextStyle(color: RippleColors.textPrimary, fontWeight: FontWeight.w600),
+          ),
+          content: SizedBox(
+            width: 320,
+            height: 420,
+            child: GridView.builder(
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 7,
+                childAspectRatio: 1,
+                crossAxisSpacing: 8,
+                mainAxisSpacing: 8,
+              ),
+              itemCount: _reactionEmojis.length,
+              itemBuilder: (_, index) {
+                final emoji = _reactionEmojis[index];
+                final selected = currentReaction == emoji;
+                return GestureDetector(
+                  onTap: () {
+                    Navigator.pop(dialogContext, emoji);
+                  },
+                  child: Container(
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: selected ? RippleColors.primary.withValues(alpha: 0.25) : RippleColors.surfaceVariant,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: selected ? RippleColors.primary : RippleColors.border,
+                        width: selected ? 1.5 : 0.5,
+                      ),
+                    ),
+                    child: Text(
+                      emoji,
+                      style: const TextStyle(fontSize: 26),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, null),
+              child: const Text('Cancel'),
+            ),
+            if (currentReaction != null)
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, '__remove__'),
+                child: const Text('Remove', style: TextStyle(color: RippleColors.error)),
+              ),
+          ],
+        );
+      },
+    ).then((selected) {
+      if (selected == null) return;
+      if (selected == '__remove__') {
+        _toggleCommentReaction(commentId, currentReaction ?? '');
+      } else {
+        _toggleCommentReaction(commentId, selected);
+      }
+    });
   }
 
   /// Whether the current user can pin/unpin this comment
@@ -1356,6 +1529,18 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                             ),
                           ),
                         ),
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          onTap: () {
+                            final id = commentId;
+                            if (id == null) return;
+                            _showEmojiPicker(id);
+                          },
+                          child: const Text(
+                            '😀',
+                            style: TextStyle(fontSize: 14),
+                          ),
+                        ),
                         const SizedBox(width: 12),
                         GestureDetector(
                           onTap: () {
@@ -1417,6 +1602,8 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                     ),
                     const SizedBox(height: 2),
                     _buildCommentContent(content ?? ''),
+                    const SizedBox(height: 6),
+                    _buildCommentReactions(commentId ?? ''),
                   ],
                 ),
               ),
@@ -1588,6 +1775,66 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
 
     return RichText(
       text: TextSpan(children: spans),
+    );
+  }
+
+  /// Reaction chips for a comment: one chip per emoji, highlighted when the
+  /// current user reacted. Tapping a chip toggles that reaction.
+  Widget _buildCommentReactions(String commentId) {
+    final reactions = _commentReactions[commentId] ?? {};
+    final userReaction = _commentUserReaction[commentId];
+
+    if (reactions.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(left: 4),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 4,
+        children: reactions.entries.map((entry) {
+          final emoji = entry.key;
+          final count = entry.value;
+          final selected = userReaction == emoji;
+          return GestureDetector(
+            onTap: () => _toggleCommentReaction(commentId, emoji),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: selected
+                    ? RippleColors.primary.withValues(alpha: 0.2)
+                    : RippleColors.surfaceVariant,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: selected ? RippleColors.primary : RippleColors.border,
+                  width: selected ? 1.5 : 0.5,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    emoji,
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                  if (count > 1) ...[
+                    const SizedBox(width: 4),
+                    Text(
+                      '$count',
+                      style: TextStyle(
+                        color: selected ? RippleColors.primary : RippleColors.textSecondary,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          );
+        }).toList(),
+      ),
     );
   }
 

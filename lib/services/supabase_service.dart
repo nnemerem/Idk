@@ -1039,4 +1039,170 @@ class SupabaseService {
         .maybeSingle();
     return response?['user_id'] as String?;
   }
+
+  // ---------------------------------------------------------------------------
+  // Emoji reactions — post comments
+  // ---------------------------------------------------------------------------
+
+  /// Add or replace the current user's emoji reaction on a post comment.
+  /// Notifies the comment author (skips self-reactions).
+  Future<void> addPostCommentReaction(String commentId, String emoji) async {
+    final currentUserId = currentUser!.id;
+    await client
+        .from(RippleConstants.tablePostCommentReactions)
+        .upsert({
+      'comment_id': commentId,
+      'user_id': currentUserId,
+      'emoji': emoji,
+      'created_at': DateTime.now().toIso8601String(),
+    }, onConflict: 'comment_id, user_id');
+
+    // Notify the comment owner (skip self-reactions)
+    final commentOwnerId = await _getPostCommentOwnerId(commentId);
+    if (commentOwnerId != null && commentOwnerId != currentUserId) {
+      final myProfile = await getProfile(currentUserId);
+      final myUsername = myProfile?['username'] as String?;
+      if (myUsername != null) {
+        try {
+          await createNotification(
+            targetUserId: commentOwnerId,
+            type: 'comment_reaction',
+            title: '@$myUsername',
+            body: 'reacted with $emoji to your comment',
+            data: {
+              'actor_id': currentUserId,
+              'comment_id': commentId,
+              'emoji': emoji,
+              'post_comment': true,
+            },
+          );
+        } catch (_) {
+          // Notification failures are non-fatal
+        }
+      }
+    }
+  }
+
+  /// Remove the current user's reaction from a post comment.
+  Future<void> removePostCommentReaction(String commentId) async {
+    final currentUserId = currentUser!.id;
+    await client
+        .from(RippleConstants.tablePostCommentReactions)
+        .delete()
+        .eq('comment_id', commentId)
+        .eq('user_id', currentUserId);
+  }
+
+  /// Reactions for a post comment: {'reactions': {emoji: count}, 'userReaction': String?}
+  Future<Map<String, dynamic>> getPostCommentReactions(String commentId) async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tablePostCommentReactions)
+        .select('emoji, user_id')
+        .eq('comment_id', commentId);
+
+    final reactions = <String, int>{};
+    String? userReaction;
+    for (final row in (response as List)) {
+      final emoji = row['emoji'] as String;
+      reactions[emoji] = (reactions[emoji] ?? 0) + 1;
+      if (row['user_id'] == currentUserId) {
+        userReaction = emoji;
+      }
+    }
+    return {'reactions': reactions, 'userReaction': userReaction};
+  }
+
+  // ---------------------------------------------------------------------------
+  // Emoji reactions — reel comments
+  // ---------------------------------------------------------------------------
+
+  /// Add or replace the current user's emoji reaction on a reel comment.
+  /// Notifies the comment author (skips self-reactions).
+  Future<void> addReelCommentReaction(String commentId, String emoji) async {
+    final currentUserId = currentUser!.id;
+    await client
+        .from(RippleConstants.tableReelCommentReactions)
+        .upsert({
+      'comment_id': commentId,
+      'user_id': currentUserId,
+      'emoji': emoji,
+      'created_at': DateTime.now().toIso8601String(),
+    }, onConflict: 'comment_id, user_id');
+
+    // Notify the comment owner (skip self-reactions)
+    final commentOwnerId = await _getReelCommentOwnerId(commentId);
+    if (commentOwnerId != null && commentOwnerId != currentUserId) {
+      final myProfile = await getProfile(currentUserId);
+      final myUsername = myProfile?['username'] as String?;
+      if (myUsername != null) {
+        try {
+          await createNotification(
+            targetUserId: commentOwnerId,
+            type: 'comment_reaction',
+            title: '@$myUsername',
+            body: 'reacted with $emoji to your comment',
+            data: {
+              'actor_id': currentUserId,
+              'comment_id': commentId,
+              'emoji': emoji,
+              'post_comment': false,
+            },
+          );
+        } catch (_) {
+          // Notification failures are non-fatal
+        }
+      }
+    }
+  }
+
+  /// Remove the current user's reaction from a reel comment.
+  Future<void> removeReelCommentReaction(String commentId) async {
+    final currentUserId = currentUser!.id;
+    await client
+        .from(RippleConstants.tableReelCommentReactions)
+        .delete()
+        .eq('comment_id', commentId)
+        .eq('user_id', currentUserId);
+  }
+
+  /// Reactions for a reel comment: {'reactions': {emoji: count}, 'userReaction': String?}
+  Future<Map<String, dynamic>> getReelCommentReactions(String commentId) async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tableReelCommentReactions)
+        .select('emoji, user_id')
+        .eq('comment_id', commentId);
+
+    final reactions = <String, int>{};
+    String? userReaction;
+    for (final row in (response as List)) {
+      final emoji = row['emoji'] as String;
+      reactions[emoji] = (reactions[emoji] ?? 0) + 1;
+      if (row['user_id'] == currentUserId) {
+        userReaction = emoji;
+      }
+    }
+    return {'reactions': reactions, 'userReaction': userReaction};
+  }
+
+  /// Helper: get the owner id of a post comment.
+  Future<String?> _getPostCommentOwnerId(String commentId) async {
+    final response = await client
+        .from(RippleConstants.tablePostComments)
+        .select('user_id')
+        .eq('id', commentId)
+        .maybeSingle();
+    return response?['user_id'] as String?;
+  }
+
+  /// Helper: get the owner id of a reel comment.
+  Future<String?> _getReelCommentOwnerId(String commentId) async {
+    final response = await client
+        .from(RippleConstants.tableReelComments)
+        .select('user_id')
+        .eq('id', commentId)
+        .maybeSingle();
+    return response?['user_id'] as String?;
+  }
 }
