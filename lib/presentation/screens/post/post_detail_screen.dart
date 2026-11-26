@@ -108,60 +108,6 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     }
   }
 
-  Future<void> _addComment({String? parentId}) async {
-    final content = _commentController.text.trim();
-    if (content.isEmpty) return;
-
-    AuthGuard.run(context, onAuthenticated: () async {
-      try {
-        await SupabaseService().createPostComment(
-          postId: widget.postId,
-          content: content,
-          parentId: parentId,
-        );
-
-        // Notify mentioned users (best effort — never breaks the comment)
-        try {
-          final myProfile = await SupabaseService().getProfile(
-            SupabaseService().currentUser!.id,
-          );
-          final myUsername = myProfile?['username'] as String?;
-          await SupabaseService().notifyMentions(
-            actorId: SupabaseService().currentUser!.id,
-            text: content,
-            mentionedIn: myUsername != null
-                ? '@$myUsername mentioned you in a comment'
-                : 'mentioned you in a comment',
-            contextData: {
-              'actor_id': SupabaseService().currentUser!.id,
-              'post_id': widget.postId,
-              'parent_id': parentId,
-            },
-          );
-        } catch (_) {
-          // Mention notifications are non-fatal
-        }
-
-        _commentController.clear();
-        if (parentId != null) {
-          setState(() => _replyingTo = null);
-          _replyControllers.remove(parentId)?.dispose();
-        }
-        _loadComments();
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Failed to add comment'),
-              backgroundColor: RippleColors.error,
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-      }
-    }, actionName: 'comment');
-  }
-
   Future<void> _loadCollections() async {
     try {
       final collections = await SupabaseService().getCollections();
