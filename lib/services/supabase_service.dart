@@ -736,4 +736,153 @@ class SupabaseService {
       }
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Comment pinning
+  // ---------------------------------------------------------------------------
+
+  /// Pin a post comment (unpins any other pinned comment on the same post).
+  /// Allowed for the comment author or the post owner.
+  Future<void> pinPostComment(String commentId, String postId) async {
+    final currentUserId = currentUser!.id;
+
+    // Verify the current user may pin: comment author or post owner
+    final comment = await client
+        .from(RippleConstants.tablePostComments)
+        .select('user_id')
+        .eq('id', commentId)
+        .maybeSingle();
+    final commentAuthorId = comment?['user_id'] as String?;
+    final post = await client
+        .from(RippleConstants.tablePosts)
+        .select('user_id')
+        .eq('id', postId)
+        .maybeSingle();
+    final postOwnerId = post?['user_id'] as String?;
+
+    if (commentAuthorId != currentUserId && postOwnerId != currentUserId) {
+      return; // Not authorized to pin
+    }
+
+    // Unpin all other comments on this post
+    await client
+        .from(RippleConstants.tablePostComments)
+        .update({'is_pinned': false})
+        .eq('post_id', postId)
+        .eq('is_pinned', true);
+
+    // Pin this comment
+    await client
+        .from(RippleConstants.tablePostComments)
+        .update({'is_pinned': true})
+        .eq('id', commentId);
+  }
+
+  /// Unpin a post comment. Allowed for the comment author or the post owner.
+  Future<void> unpinPostComment(String commentId, String postId) async {
+    final currentUserId = currentUser!.id;
+
+    final comment = await client
+        .from(RippleConstants.tablePostComments)
+        .select('user_id')
+        .eq('id', commentId)
+        .maybeSingle();
+    final commentAuthorId = comment?['user_id'] as String?;
+    final post = await client
+        .from(RippleConstants.tablePosts)
+        .select('user_id')
+        .eq('id', postId)
+        .maybeSingle();
+    final postOwnerId = post?['user_id'] as String?;
+
+    if (commentAuthorId != currentUserId && postOwnerId != currentUserId) {
+      return; // Not authorized to unpin
+    }
+
+    await client
+        .from(RippleConstants.tablePostComments)
+        .update({'is_pinned': false})
+        .eq('id', commentId);
+  }
+
+  /// Whether a post comment is pinned.
+  Future<bool> isPostCommentPinned(String commentId) async {
+    final response = await client
+        .from(RippleConstants.tablePostComments)
+        .select('is_pinned')
+        .eq('id', commentId)
+        .maybeSingle();
+    return response?['is_pinned'] == true;
+  }
+
+  /// Pin a reel comment (unpins any other pinned comment on the same reel).
+  /// Allowed for the comment author or the reel owner.
+  Future<void> pinReelComment(String commentId, String reelId) async {
+    final currentUserId = currentUser!.id;
+
+    final comment = await client
+        .from(RippleConstants.tableReelComments)
+        .select('user_id')
+        .eq('id', commentId)
+        .maybeSingle();
+    final commentAuthorId = comment?['user_id'] as String?;
+    final reel = await client
+        .from(RippleConstants.tableReels)
+        .select('user_id')
+        .eq('id', reelId)
+        .maybeSingle();
+    final reelOwnerId = reel?['user_id'] as String?;
+
+    if (commentAuthorId != currentUserId && reelOwnerId != currentUserId) {
+      return; // Not authorized to pin
+    }
+
+    await client
+        .from(RippleConstants.tableReelComments)
+        .update({'is_pinned': false})
+        .eq('reel_id', reelId)
+        .eq('is_pinned', true);
+
+    await client
+        .from(RippleConstants.tableReelComments)
+        .update({'is_pinned': true})
+        .eq('id', commentId);
+  }
+
+  /// Unpin a reel comment. Allowed for the comment author or the reel owner.
+  Future<void> unpinReelComment(String commentId, String reelId) async {
+    final currentUserId = currentUser!.id;
+
+    final comment = await client
+        .from(RippleConstants.tableReelComments)
+        .select('user_id')
+        .eq('id', commentId)
+        .maybeSingle();
+    final commentAuthorId = comment?['user_id'] as String?;
+    final reel = await client
+        .from(RippleConstants.tableReels)
+        .select('user_id')
+        .eq('id', reelId)
+        .maybeSingle();
+    final reelOwnerId = reel?['user_id'] as String?;
+
+    if (commentAuthorId != currentUserId && reelOwnerId != currentUserId) {
+      return; // Not authorized to unpin
+    }
+
+    await client
+        .from(RippleConstants.tableReelComments)
+        .update({'is_pinned': false})
+        .eq('id', commentId);
+  }
+
+  /// Whether a reel comment is pinned.
+  Future<bool> isReelCommentPinned(String commentId) async {
+    final response = await client
+        .from(RippleConstants.tableReelComments)
+        .select('is_pinned')
+        .eq('id', commentId)
+        .maybeSingle();
+    return response?['is_pinned'] == true;
+  }
 }

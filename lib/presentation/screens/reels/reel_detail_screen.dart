@@ -27,6 +27,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
   List<Map<String, dynamic>> _collections = [];
   Map<String, bool> _commentLikeStatus = {};
   Map<String, int> _commentLikeCounts = {};
+  Map<String, bool> _commentPinnedStatus = {};
   bool _isSaved = false;
   bool _isLoading = true;
   bool _isLoadingComments = false;
@@ -145,6 +146,18 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
           .order('created_at', ascending: true);
 
       final all = List<Map<String, dynamic>>.from(response);
+
+      // Sort: pinned comments first, then by created_at
+      all.sort((a, b) {
+        final aPinned = a['is_pinned'] == true;
+        final bPinned = b['is_pinned'] == true;
+        if (aPinned && !bPinned) return -1;
+        if (!aPinned && bPinned) return 1;
+        final aTime = DateTime.tryParse(a['created_at'] ?? '') ?? DateTime(1970);
+        final bTime = DateTime.tryParse(b['created_at'] ?? '') ?? DateTime(1970);
+        return bTime.compareTo(aTime);
+      });
+
       final topLevel = all.where((c) => c['parent_id'] == null).toList();
       final repliesByParent = <String, List<Map<String, dynamic>>>{};
       for (final c in all) {
@@ -153,6 +166,18 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
           repliesByParent.putIfAbsent(pid, () => []).add(c);
         }
       }
+
+      // Sort replies within each parent: pinned first
+      repliesByParent.updateAll((pid, replies) {
+        replies.sort((a, b) {
+          final aPinned = a['is_pinned'] == true;
+          final bPinned = b['is_pinned'] == true;
+          if (aPinned && !bPinned) return -1;
+          if (!aPinned && bPinned) return 1;
+          return 0;
+        });
+        return replies;
+      });
 
       if (mounted) {
         setState(() {
@@ -188,6 +213,19 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
 
     final likeStatus = <String, bool>{};
     final likeCounts = <String, int>{};
+    final pinnedStatus = <String, bool>{};
+
+    // Collect pinned status from already-loaded comment data
+    for (final c in _topLevelComments) {
+      final id = c['id'];
+      if (id != null) pinnedStatus[id] = c['is_pinned'] == true;
+    }
+    for (final replies in _repliesByParent.values) {
+      for (final c in replies) {
+        final id = c['id'];
+        if (id != null) pinnedStatus[id] = c['is_pinned'] == true;
+      }
+    }
 
     for (final id in allIds) {
       try {
@@ -205,6 +243,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
       setState(() {
         _commentLikeStatus = likeStatus;
         _commentLikeCounts = likeCounts;
+        _commentPinnedStatus = pinnedStatus;
       });
     }
   }
@@ -237,6 +276,50 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Failed to ${currentlyLiked ? 'unlike' : 'like'} comment'),
+            backgroundColor: RippleColors.error,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Whether the current user can pin/unpin this comment
+  /// (comment author or reel owner).
+  bool _canPinComment(Map<String, dynamic> comment) {
+    final currentUserId = SupabaseService().currentUser?.id;
+    if (currentUserId == null) return false;
+    final commentAuthorId = comment['user_id'] as String?;
+    final reelOwnerId = _reel?['user_id'] as String?;
+    return commentAuthorId == currentUserId || reelOwnerId == currentUserId;
+  }
+
+  /// Toggle pin on a reel comment.
+  Future<void> _toggleCommentPin(String commentId) async {
+    final currentlyPinned = _commentPinnedStatus[commentId] == true;
+
+    // Optimistic update
+    setState(() {
+      _commentPinnedStatus[commentId] = !currentlyPinned;
+    });
+
+    try {
+      if (currentlyPinned) {
+        await SupabaseService().unpinReelComment(commentId, widget.reelId);
+      } else {
+        await SupabaseService().pinReelComment(commentId, widget.reelId);
+      }
+      // Refresh to get authoritative state (re-sorts pinned to top)
+      _loadComments();
+    } catch (e) {
+      // Revert optimistic update on failure
+      setState(() {
+        _commentPinnedStatus[commentId] = currentlyPinned;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to ${currentlyPinned ? 'unpin' : 'pin'} comment'),
             backgroundColor: RippleColors.error,
             behavior: SnackBarBehavior.floating,
           ),
@@ -1149,6 +1232,25 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                             _formatTimestamp(createdAt),
                             style: TextStyle(color: RippleColors.textTertiary, fontSize: 11),
                           ),
+                        if (_commentPinnedStatus[commentId ?? ''] == true) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: RippleColors.primary.withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: RippleColors.primary, width: 0.5),
+                            ),
+                            child: const Text(
+                              'Pinned',
+                              style: TextStyle(
+                                color: RippleColors.primary,
+                                fontSize: 9,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
                         const Spacer(),
                         GestureDetector(
                           onTap: () {
@@ -1205,6 +1307,26 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                             ],
                           ),
                         ),
+                        // Pin toggle — only for comment author or reel owner
+                        if (_canPinComment(comment)) ...[
+                          const SizedBox(width: 12),
+                          GestureDetector(
+                            onTap: () {
+                              final id = commentId;
+                              if (id == null) return;
+                              _toggleCommentPin(id);
+                            },
+                            child: Icon(
+                              _commentPinnedStatus[commentId ?? ''] == true
+                                  ? Icons.push_pin
+                                  : Icons.push_pin_outlined,
+                              size: 16,
+                              color: _commentPinnedStatus[commentId ?? ''] == true
+                                  ? RippleColors.primary
+                                  : RippleColors.textSecondary,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                     const SizedBox(height: 2),
