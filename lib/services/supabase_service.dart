@@ -885,4 +885,158 @@ class SupabaseService {
         .maybeSingle();
     return response?['is_pinned'] == true;
   }
+
+  // ---------------------------------------------------------------------------
+  // Reposts
+  // ---------------------------------------------------------------------------
+
+  /// Repost a post. No-op if already reposted.
+  Future<void> repostPost(String postId) async {
+    final currentUserId = currentUser!.id;
+    await client.from(RippleConstants.tablePostReposts).insert({
+      'post_id': postId,
+      'user_id': currentUserId,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+
+    // Notify the post owner (skip self-reposts)
+    final postOwnerId = await _getPostOwnerId(postId);
+    if (postOwnerId != null && postOwnerId != currentUserId) {
+      try {
+        final myProfile = await getProfile(currentUserId);
+        final myUsername = myProfile?['username'] as String?;
+        if (myUsername != null) {
+          await createNotification(
+            targetUserId: postOwnerId,
+            type: 'repost',
+            title: '@$myUsername',
+            body: 'reposted your post',
+            data: {
+              'actor_id': currentUserId,
+              'post_id': postId,
+            },
+          );
+        }
+      } catch (_) {
+        // Notification failures are non-fatal
+      }
+    }
+  }
+
+  /// Unrepost a post. No-op if not reposted.
+  Future<void> unrepostPost(String postId) async {
+    final currentUserId = currentUser!.id;
+    await client
+        .from(RippleConstants.tablePostReposts)
+        .delete()
+        .eq('post_id', postId)
+        .eq('user_id', currentUserId);
+  }
+
+  /// Whether the current user has reposted a post.
+  Future<bool> isPostReposted(String postId) async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tablePostReposts)
+        .select('id')
+        .eq('post_id', postId)
+        .eq('user_id', currentUserId)
+        .maybeSingle();
+    return response != null;
+  }
+
+  /// Repost count for a post.
+  Future<int> getPostRepostCount(String postId) async {
+    final response = await client
+        .from(RippleConstants.tablePostReposts)
+        .select('id')
+        .eq('post_id', postId)
+        .count(CountOption.exact);
+    return response.count;
+  }
+
+  /// Repost a reel. No-op if already reposted.
+  Future<void> repostReel(String reelId) async {
+    final currentUserId = currentUser!.id;
+    await client.from(RippleConstants.tableReelReposts).insert({
+      'reel_id': reelId,
+      'user_id': currentUserId,
+      'created_at': DateTime.now().toIso8601String(),
+    });
+
+    // Notify the reel owner (skip self-reposts)
+    final reelOwnerId = await _getReelOwnerId(reelId);
+    if (reelOwnerId != null && reelOwnerId != currentUserId) {
+      try {
+        final myProfile = await getProfile(currentUserId);
+        final myUsername = myProfile?['username'] as String?;
+        if (myUsername != null) {
+          await createNotification(
+            targetUserId: reelOwnerId,
+            type: 'repost',
+            title: '@$myUsername',
+            body: 'reposted your reel',
+            data: {
+              'actor_id': currentUserId,
+              'reel_id': reelId,
+            },
+          );
+        }
+      } catch (_) {
+        // Notification failures are non-fatal
+      }
+    }
+  }
+
+  /// Unrepost a reel. No-op if not reposted.
+  Future<void> unrepostReel(String reelId) async {
+    final currentUserId = currentUser!.id;
+    await client
+        .from(RippleConstants.tableReelReposts)
+        .delete()
+        .eq('reel_id', reelId)
+        .eq('user_id', currentUserId);
+  }
+
+  /// Whether the current user has reposted a reel.
+  Future<bool> isReelReposted(String reelId) async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tableReelReposts)
+        .select('id')
+        .eq('reel_id', reelId)
+        .eq('user_id', currentUserId)
+        .maybeSingle();
+    return response != null;
+  }
+
+  /// Repost count for a reel.
+  Future<int> getReelRepostCount(String reelId) async {
+    final response = await client
+        .from(RippleConstants.tableReelReposts)
+        .select('id')
+        .eq('reel_id', reelId)
+        .count(CountOption.exact);
+    return response.count;
+  }
+
+  /// Helper: get the owner id of a post.
+  Future<String?> _getPostOwnerId(String postId) async {
+    final response = await client
+        .from(RippleConstants.tablePosts)
+        .select('user_id')
+        .eq('id', postId)
+        .maybeSingle();
+    return response?['user_id'] as String?;
+  }
+
+  /// Helper: get the owner id of a reel.
+  Future<String?> _getReelOwnerId(String reelId) async {
+    final response = await client
+        .from(RippleConstants.tableReels)
+        .select('user_id')
+        .eq('id', reelId)
+        .maybeSingle();
+    return response?['user_id'] as String?;
+  }
 }

@@ -62,6 +62,8 @@ class RippleConstants {
   static const String tableSavedCollectionItems = 'saved_collection_items';
   static const String tablePostCommentLikes = 'post_comment_likes';
   static const String tableReelCommentLikes = 'reel_comment_likes';
+  static const String tablePostReposts = 'post_reposts';
+  static const String tableReelReposts = 'reel_reposts';
 
   // Post types
   static const String postTypeImage = 'image';

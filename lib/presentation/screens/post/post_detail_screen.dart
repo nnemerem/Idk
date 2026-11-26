@@ -29,6 +29,8 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
   Map<String, bool> _commentLikeStatus = {};   // commentId -> isLiked
   Map<String, int> _commentLikeCounts = {};    // commentId -> like count
   Map<String, bool> _commentPinnedStatus = {}; // commentId -> isPinned
+  bool _isReposted = false;
+  int _repostCount = 0;
   bool _isLoading = true;
   bool _isLoadingComments = false;
   bool _isSaved = false;
@@ -44,7 +46,69 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     _loadPost();
     _loadComments();
     _loadCollections();
+    _loadReposts();
   }
+
+  Future<void> _loadReposts() async {
+    try {
+      final results = await Future.wait([
+        SupabaseService().isPostReposted(widget.postId),
+        SupabaseService().getPostRepostCount(widget.postId),
+      ]);
+      if (mounted) {
+        setState(() {
+          _isReposted = results[0] as bool;
+          _repostCount = results[1] as int;
+        });
+      }
+    } catch (_) {
+      // Repost status is non-critical
+    }
+  }
+
+  /// Toggle repost on this post.
+  Future<void> _toggleRepost() async {
+    final currentUserId = SupabaseService().currentUser?.id;
+    if (currentUserId == null) return;
+
+    final currentlyReposted = _isReposted;
+    final currentCount = _repostCount;
+
+    // Optimistic update
+    setState(() {
+      _isReposted = !currentlyReposted;
+      _repostCount = currentlyReposted
+          ? (currentCount - 1).clamp(0, 1000000)
+          : currentCount + 1;
+    });
+
+    try {
+      if (currentlyReposted) {
+        await SupabaseService().unrepostPost(widget.postId);
+      } else {
+        await SupabaseService().repostPost(widget.postId);
+      }
+      _loadReposts();
+    } catch (e) {
+      setState(() {
+        _isReposted = currentlyReposted;
+        _repostCount = currentCount;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Failed to ${currentlyReposted ? 'unrepost' : 'repost'}',
+            ),
+            backgroundColor: RippleColors.error,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _addComment({String? parentId}) async {
 
   Future<void> _loadCollections() async {
     try {
@@ -863,6 +927,26 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
           ),
+          const SizedBox(width: 4),
+          IconButton(
+            icon: Icon(
+              _isReposted ? Icons.repeat : Icons.repeat_outlined,
+              size: 28,
+              color: _isReposted ? RippleColors.primary : RippleColors.textPrimary,
+            ),
+            onPressed: _toggleRepost,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+          ),
+          const SizedBox(width: 4),
+          if (_repostCount > 0)
+            Text(
+              '${_repostCount}',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: RippleColors.textSecondary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           const Spacer(),
           IconButton(
             icon: SvgPicture.asset(

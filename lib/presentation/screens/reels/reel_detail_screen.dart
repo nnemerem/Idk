@@ -28,6 +28,8 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
   Map<String, bool> _commentLikeStatus = {};
   Map<String, int> _commentLikeCounts = {};
   Map<String, bool> _commentPinnedStatus = {};
+  bool _isReposted = false;
+  int _repostCount = 0;
   bool _isSaved = false;
   bool _isLoading = true;
   bool _isLoadingComments = false;
@@ -45,6 +47,65 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
     _loadReel();
     _loadComments();
     _loadCollections();
+    _loadReposts();
+  }
+
+  Future<void> _loadReposts() async {
+    try {
+      final results = await Future.wait([
+        SupabaseService().isReelReposted(widget.reelId),
+        SupabaseService().getReelRepostCount(widget.reelId),
+      ]);
+      if (mounted) {
+        setState(() {
+          _isReposted = results[0] as bool;
+          _repostCount = results[1] as int;
+        });
+      }
+    } catch (_) {
+      // Repost status is non-critical
+    }
+  }
+
+  /// Toggle repost on this reel.
+  Future<void> _toggleRepost() async {
+    final currentUserId = SupabaseService().currentUser?.id;
+    if (currentUserId == null) return;
+
+    final currentlyReposted = _isReposted;
+    final currentCount = _repostCount;
+
+    setState(() {
+      _isReposted = !currentlyReposted;
+      _repostCount = currentlyReposted
+          ? (currentCount - 1).clamp(0, 1000000)
+          : currentCount + 1;
+    });
+
+    try {
+      if (currentlyReposted) {
+        await SupabaseService().unrepostReel(widget.reelId);
+      } else {
+        await SupabaseService().repostReel(widget.reelId);
+      }
+      _loadReposts();
+    } catch (e) {
+      setState(() {
+        _isReposted = currentlyReposted;
+        _repostCount = currentCount;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Failed to ${currentlyReposted ? 'unrepost' : 'repost'}',
+            ),
+            backgroundColor: RippleColors.error,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _loadCollections() async {
@@ -672,6 +733,31 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                     iconAsset: 'assets/icons/send.svg',
                     label: '',
                     onTap: _onShare,
+                  ),
+                  const SizedBox(height: 24),
+                  GestureDetector(
+                    onTap: _toggleRepost,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _isReposted ? Icons.repeat : Icons.repeat_outlined,
+                          size: 28,
+                          color: _isReposted ? RippleColors.primary : Colors.white,
+                        ),
+                        if (_repostCount > 0) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            '${_repostCount}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 24),
                   _ActionButton(
