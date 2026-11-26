@@ -686,4 +686,54 @@ class SupabaseService {
         .count(CountOption.exact);
     return response.count;
   }
+
+  // ---------------------------------------------------------------------------
+  // Mentions (@username)
+  // ---------------------------------------------------------------------------
+
+  /// Extract @usernames from text (e.g. "hello @alice @bob" → ["alice", "bob"]).
+  ///
+  /// Usernames are matched as @ followed by word characters (letters, digits,
+  /// underscore, period). Case-insensitive matching against stored usernames
+  /// happens at lookup time.
+  static List<String> parseMentions(String text) {
+    final RegExp mentionRegex = RegExp(r'@(\w[\w\.]*)');
+    final matches = mentionRegex.allMatches(text);
+    return matches.map((m) => m.group(1)!).toSet().toList();
+  }
+
+  /// Look up mentioned users and create a mention notification for each.
+  ///
+  /// [actorId] is the user who wrote the mention. [contextData] is extra data
+  /// stored on the notification (e.g. post_id, reel_id, comment_id).
+  /// [mentionedIn] is a human-readable description of where the mention
+  /// appeared (e.g. "commented on your post").
+  Future<void> notifyMentions({
+    required String actorId,
+    required String text,
+    required Map<String, dynamic> contextData,
+    required String mentionedIn,
+  }) async {
+    final usernames = parseMentions(text);
+    if (usernames.isEmpty) return;
+
+    for (final username in usernames) {
+      try {
+        final mentioned = await getProfileByUsername(username);
+        if (mentioned == null) continue; // No such user — skip silently
+        final mentionedId = mentioned['id'] as String?;
+        if (mentionedId == null || mentionedId == actorId) continue;
+
+        await createNotification(
+          targetUserId: mentionedId,
+          type: 'mention',
+          title: '@$username',
+          body: mentionedIn,
+          data: contextData,
+        );
+      } catch (_) {
+        // Mention notification failures are non-fatal
+      }
+    }
+  }
 }

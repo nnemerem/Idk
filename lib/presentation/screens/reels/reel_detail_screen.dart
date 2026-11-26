@@ -270,6 +270,28 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
           parentId: parentId,
         );
 
+        // Notify mentioned users (best effort — never breaks the comment)
+        try {
+          final myProfile = await SupabaseService().getProfile(
+            SupabaseService().currentUser!.id,
+          );
+          final myUsername = myProfile?['username'] as String?;
+          await SupabaseService().notifyMentions(
+            actorId: SupabaseService().currentUser!.id,
+            text: content,
+            mentionedIn: myUsername != null
+                ? '@$myUsername mentioned you in a comment'
+                : 'mentioned you in a comment',
+            contextData: {
+              'actor_id': SupabaseService().currentUser!.id,
+              'reel_id': widget.reelId,
+              'parent_id': parentId,
+            },
+          );
+        } catch (_) {
+          // Mention notifications are non-fatal
+        }
+
         _commentController.clear();
         if (parentId != null) {
           setState(() => _replyingTo = null);
@@ -1185,10 +1207,7 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
                       ],
                     ),
                     const SizedBox(height: 2),
-                    Text(
-                      content ?? '',
-                      style: const TextStyle(color: Colors.white, fontSize: 14),
-                    ),
+                    _buildCommentContent(content ?? ''),
                   ],
                 ),
               ),
@@ -1309,6 +1328,57 @@ class _ReelDetailScreenState extends State<ReelDetailScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  /// Render comment content with @username mentions as tappable links.
+  Widget _buildCommentContent(String content) {
+    final mentionRegex = RegExp(r'@(\w[\w\.]*)');
+    final matches = mentionRegex.allMatches(content);
+    final spans = <TextSpan>[];
+    var lastIndex = 0;
+
+    for (final match in matches) {
+      if (match.start > lastIndex) {
+        spans.add(TextSpan(
+          text: content.substring(lastIndex, match.start),
+          style: const TextStyle(color: Colors.white, fontSize: 14),
+        ));
+      }
+
+      final username = match.group(1)!;
+      spans.add(TextSpan(
+        text: '@$username',
+        style: const TextStyle(
+          color: RippleColors.primary,
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+        ),
+        recognizer: TapGestureRecognizer()
+          ..onTap = () {
+            context.go('/user/$username');
+          },
+      ));
+
+      lastIndex = match.end;
+    }
+
+    if (lastIndex < content.length) {
+      spans.add(TextSpan(
+        text: content.substring(lastIndex),
+        style: const TextStyle(color: Colors.white, fontSize: 14),
+      ));
+    }
+
+    if (spans.isEmpty) {
+      return Text(
+        content,
+        style: const TextStyle(color: Colors.white, fontSize: 14),
+      );
+    }
+
+    return RichText(
+      text: TextSpan(children: spans),
     );
   }
 
