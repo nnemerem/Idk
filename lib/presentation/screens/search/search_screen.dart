@@ -51,7 +51,6 @@ class _SearchScreenState extends State<SearchScreen> {
 
   bool _isSearching = false;
   final Set<String> _followingIds = {};
-  bool _hasSearched = false;
 
   @override
   void initState() {
@@ -108,8 +107,8 @@ class _SearchScreenState extends State<SearchScreen> {
 
       if (mounted) {
         setState(() {
-          _suggested = results[0] as List<Map<String, dynamic>>;
-          _trending = results[1] as List<Map<String, dynamic>>;
+          _suggested = results[0];
+          _trending = results[1];
         });
       }
     } catch (e) {
@@ -133,7 +132,6 @@ class _SearchScreenState extends State<SearchScreen> {
         _locationPosts.clear();
         _audioReels.clear();
         _isSearching = false;
-        _hasSearched = false;
       });
     }
   }
@@ -155,7 +153,6 @@ class _SearchScreenState extends State<SearchScreen> {
 
     setState(() {
       _isSearching = true;
-      _hasSearched = true;
     });
 
     try {
@@ -335,7 +332,6 @@ class _SearchScreenState extends State<SearchScreen> {
                         _locationPosts.clear();
                         _audioReels.clear();
                         _isSearching = false;
-                        _hasSearched = false;
                       });
                     },
                   )
@@ -451,7 +447,7 @@ class _SearchScreenState extends State<SearchScreen> {
               spacing: 8,
               runSpacing: 8,
               children: _recentSearches.map((recent) {
-                return ActionChip(
+                return Chip(
                   label: Text(recent),
                   onPressed: () {
                     _searchController.text = recent;
@@ -468,6 +464,7 @@ class _SearchScreenState extends State<SearchScreen> {
                     }
                   },
                   avatar: const Icon(Icons.history, size: 16),
+                  deleteIcon: const Icon(Icons.close, size: 16),
                   onDeleted: () {
                     setState(() => _recentSearches.remove(recent));
                   },
@@ -1014,7 +1011,6 @@ class _SearchScreenState extends State<SearchScreen> {
 
   Widget _buildReelGridItem(Map<String, dynamic> reel) {
     final thumbnailUrl = reel['thumbnail_url'] as String?;
-    final videoUrl = reel['video_url'] as String?;
     final reelId = reel['id'] as String?;
 
     return GestureDetector(
