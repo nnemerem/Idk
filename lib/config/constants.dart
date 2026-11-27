@@ -37,6 +37,8 @@ class RippleConstants {
   static const String routeSettings = '/profile/settings';
   static const String routeEditProfile = '/profile/edit-profile';
   static const String routeNotifications = '/notifications';
+  static const String routeBlockedAccounts = '/profile/blocked-accounts';
+  static const String routeRestrictedAccounts = '/profile/restricted-accounts';
 
   // Storage buckets
   static const String bucketAvatars = 'avatars';

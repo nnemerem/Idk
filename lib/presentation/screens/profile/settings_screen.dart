@@ -140,13 +140,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   iconAsset: 'assets/icons/block.svg',
                   title: 'Blocked Accounts',
                   subtitle: 'Accounts you have blocked',
-                  onTap: () => _showComingSoon('Blocked Accounts'),
+                  onTap: () => context.go(RippleConstants.routeBlockedAccounts),
                 ),
                 _SettingsTile(
                   iconAsset: 'assets/icons/person_remove.svg',
                   title: 'Restricted Accounts',
                   subtitle: 'Accounts you have restricted',
-                  onTap: () => _showComingSoon('Restricted Accounts'),
+                  onTap: () => context.go(RippleConstants.routeRestrictedAccounts),
                 ),
                 _SettingsTile(
                   iconAsset: 'assets/icons/privacy.svg',

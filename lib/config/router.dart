@@ -21,6 +21,8 @@ import 'package:ripple/presentation/screens/search/search_screen.dart';
 import 'package:ripple/presentation/screens/notifications/notifications_screen.dart';
 import 'package:ripple/presentation/screens/profile/settings_screen.dart';
 import 'package:ripple/presentation/screens/profile/edit_profile_screen.dart';
+import 'package:ripple/presentation/screens/profile/blocked_accounts_screen.dart';
+import 'package:ripple/presentation/screens/profile/restricted_accounts_screen.dart';
 import 'package:ripple/presentation/components/ripple_bottom_nav.dart';
 import 'package:ripple/config/constants.dart';
 
@@ -149,6 +151,16 @@ final GoRouter appRouter = GoRouter(
                   path: 'edit-profile',
                   name: 'edit-profile',
                   builder: (context, state) => const EditProfileScreen(),
+                ),
+                GoRoute(
+                  path: 'blocked-accounts',
+                  name: 'blocked-accounts',
+                  builder: (context, state) => const BlockedAccountsScreen(),
+                ),
+                GoRoute(
+                  path: 'restricted-accounts',
+                  name: 'restricted-accounts',
+                  builder: (context, state) => const RestrictedAccountsScreen(),
                 ),
               ],
             ),
