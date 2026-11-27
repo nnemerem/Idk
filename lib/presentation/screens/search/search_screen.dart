@@ -19,15 +19,39 @@ class SearchScreen extends StatefulWidget {
 class _SearchScreenState extends State<SearchScreen> {
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
+  Timer? _debounceTimer;
+
+  // Discovery categories
+  static const List<String> _discoveryTabs = [
+    'For You',
+    'Hashtags',
+    'Locations',
+    'Audio',
+  ];
+  String _discoveryTab = 'For You';
+
+  // Search results tabs
+  static const List<String> _resultsTabs = ['Top', 'Accounts', 'Posts', 'Reels'];
+  String _resultsTab = 'Top';
+
+  // Standard search results
   List<Map<String, dynamic>> _users = [];
   List<Map<String, dynamic>> _posts = [];
   List<Map<String, dynamic>> _reels = [];
-  bool _isSearching = false;
-  String _selectedTab = 'Top';
-  final Set<String> _followingIds = {};
-  Timer? _debounceTimer;
 
-  final List<String> _tabs = ['Top', 'Accounts', 'Reels'];
+  // Discovery results
+  List<Map<String, dynamic>> _hashtagPosts = [];
+  List<Map<String, dynamic>> _locationPosts = [];
+  List<Map<String, dynamic>> _audioReels = [];
+
+  // Discovery (shown when the query is empty)
+  List<Map<String, dynamic>> _suggested = [];
+  List<Map<String, dynamic>> _trending = [];
+  List<String> _recentSearches = [];
+
+  bool _isSearching = false;
+  final Set<String> _followingIds = {};
+  bool _hasSearched = false;
 
   @override
   void initState() {
@@ -35,6 +59,7 @@ class _SearchScreenState extends State<SearchScreen> {
     _focusNode.requestFocus();
     _searchController.addListener(_onSearchChanged);
     _loadFollowingIds();
+    _loadDiscovery();
   }
 
   @override
@@ -71,6 +96,27 @@ class _SearchScreenState extends State<SearchScreen> {
     }
   }
 
+  /// Load suggested accounts + trending posts for the "For You" discovery view.
+  Future<void> _loadDiscovery() async {
+    if (GuestMode.isGuestMode) return;
+
+    try {
+      final results = await Future.wait([
+        SupabaseService().getSuggestedAccounts(limit: 10),
+        SupabaseService().getTrendingPosts(limit: 10),
+      ]);
+
+      if (mounted) {
+        setState(() {
+          _suggested = results[0] as List<Map<String, dynamic>>;
+          _trending = results[1] as List<Map<String, dynamic>>;
+        });
+      }
+    } catch (e) {
+      // Discovery is non-critical
+    }
+  }
+
   void _onSearchChanged() {
     final query = _searchController.text.trim();
     _debounceTimer?.cancel();
@@ -83,47 +129,69 @@ class _SearchScreenState extends State<SearchScreen> {
         _users.clear();
         _posts.clear();
         _reels.clear();
+        _hashtagPosts.clear();
+        _locationPosts.clear();
+        _audioReels.clear();
         _isSearching = false;
+        _hasSearched = false;
       });
     }
   }
 
+  void _addRecentSearch(String query) {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) return;
+    setState(() {
+      _recentSearches.remove(trimmed);
+      _recentSearches.insert(0, trimmed);
+      if (_recentSearches.length > 10) _recentSearches.removeLast();
+    });
+  }
+
   Future<void> _search(String query) async {
-    setState(() => _isSearching = true);
+    final trimmed = query.trim();
+    if (trimmed.length < 2) return;
+    _addRecentSearch(trimmed);
+
+    setState(() {
+      _isSearching = true;
+      _hasSearched = true;
+    });
 
     try {
-      // Search users
-      final usersResponse = await SupabaseService().client
-          .from(RippleConstants.tableProfiles)
-          .select()
-          .ilike('username', '%$query%')
-          .limit(20);
-
-      // Search posts
-      final postsResponse = await SupabaseService().client
-          .from(RippleConstants.tablePosts)
-          .select('''
-            *,
-            profiles:user_id (id, username, display_name, avatar_url)
-          ''')
-          .ilike('caption', '%$query%')
-          .limit(20);
-
-      // Search reels
-      final reelsResponse = await SupabaseService().client
-          .from(RippleConstants.tableReels)
-          .select('''
-            *,
-            profiles:user_id (id, username, display_name, avatar_url)
-          ''')
-          .ilike('caption', '%$query%')
-          .limit(20);
+      final results = await Future.wait([
+        SupabaseService().client
+            .from(RippleConstants.tableProfiles)
+            .select()
+            .ilike('username', '%$trimmed%')
+            .limit(20),
+        SupabaseService().client
+            .from(RippleConstants.tablePosts)
+            .select('''
+              *,
+              profiles:user_id (id, username, display_name, avatar_url),
+              likes:post_likes (count),
+              comments:post_comments (count)
+            ''')
+            .ilike('caption', '%$trimmed%')
+            .limit(20),
+        SupabaseService().client
+            .from(RippleConstants.tableReels)
+            .select('''
+              *,
+              profiles:user_id (id, username, display_name, avatar_url),
+              likes:reel_likes (count),
+              comments:reel_comments (count)
+            ''')
+            .ilike('caption', '%$trimmed%')
+            .limit(20),
+      ]);
 
       if (mounted) {
         setState(() {
-          _users = List<Map<String, dynamic>>.from(usersResponse);
-          _posts = List<Map<String, dynamic>>.from(postsResponse);
-          _reels = List<Map<String, dynamic>>.from(reelsResponse);
+          _users = List<Map<String, dynamic>>.from(results[0]);
+          _posts = List<Map<String, dynamic>>.from(results[1]);
+          _reels = List<Map<String, dynamic>>.from(results[2]);
           _isSearching = false;
         });
       }
@@ -131,6 +199,34 @@ class _SearchScreenState extends State<SearchScreen> {
       if (mounted) {
         setState(() => _isSearching = false);
       }
+    }
+  }
+
+  /// Run a discovery search for the active discovery tab (hashtag / location / audio).
+  Future<void> _searchDiscovery(String query) async {
+    final trimmed = query.trim();
+    if (trimmed.length < 2) return;
+    _addRecentSearch(trimmed);
+
+    setState(() => _isSearching = true);
+
+    try {
+      switch (_discoveryTab) {
+        case 'Hashtags':
+          _hashtagPosts = await SupabaseService().searchByHashtag(trimmed);
+          break;
+        case 'Locations':
+          _locationPosts = await SupabaseService().searchByLocation(trimmed);
+          break;
+        case 'Audio':
+          _audioReels = await SupabaseService().searchReelsByAudio(trimmed);
+          break;
+        default:
+      }
+    } catch (_) {
+      // Discovery search is non-critical
+    } finally {
+      if (mounted) setState(() => _isSearching = false);
     }
   }
 
@@ -149,6 +245,12 @@ class _SearchScreenState extends State<SearchScreen> {
       } else {
         _followingIds.add(targetId);
       }
+      _suggested = _suggested.map((u) {
+        if (u['id'] == targetId) {
+          return u..['_optimisticFollowing'] = !currentlyFollowing;
+        }
+        return u;
+      }).toList();
     });
 
     try {
@@ -164,13 +266,26 @@ class _SearchScreenState extends State<SearchScreen> {
         } else {
           _followingIds.remove(targetId);
         }
+        _suggested = _suggested.map((u) {
+          if (u['id'] == targetId) {
+            return u..['_optimisticFollowing'] = currentlyFollowing;
+          }
+          return u;
+        }).toList();
       });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: const Text('Could not update follow status'), backgroundColor: RippleColors.error),
+          SnackBar(
+            content: const Text('Could not update follow status'),
+            backgroundColor: RippleColors.error,
+          ),
         );
       }
     }
+  }
+
+  void _clearRecentSearches() {
+    setState(() => _recentSearches.clear());
   }
 
   @override
@@ -179,6 +294,7 @@ class _SearchScreenState extends State<SearchScreen> {
       backgroundColor: RippleColors.background,
       appBar: AppBar(
         backgroundColor: RippleColors.background,
+        elevation: 0,
         leading: IconButton(
           icon: SvgPicture.asset(
             'assets/icons/arrow_back.svg',
@@ -215,6 +331,11 @@ class _SearchScreenState extends State<SearchScreen> {
                         _users.clear();
                         _posts.clear();
                         _reels.clear();
+                        _hashtagPosts.clear();
+                        _locationPosts.clear();
+                        _audioReels.clear();
+                        _isSearching = false;
+                        _hasSearched = false;
                       });
                     },
                   )
@@ -222,46 +343,158 @@ class _SearchScreenState extends State<SearchScreen> {
           ),
           onSubmitted: (value) {
             if (value.trim().length >= 2) {
-              _search(value.trim());
+              final trimmed = value.trim();
+              if (_discoveryTab == 'For You') {
+                _search(trimmed);
+              } else {
+                _searchDiscovery(trimmed);
+              }
             }
           },
         ),
       ),
       body: Column(
         children: [
-          // Tab bar
+          // Discovery category chips (hashtag / location / audio)
           Container(
             color: RippleColors.background,
-            child: TabBar(
-              isScrollable: true,
-              tabAlignment: TabAlignment.start,
-              dividerColor: Colors.transparent,
-              indicatorColor: RippleColors.primary,
-              indicatorWeight: 3,
-              labelColor: RippleColors.textPrimary,
-              unselectedLabelColor: RippleColors.textSecondary,
-              labelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-              unselectedLabelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
-              tabs: _tabs.map((tab) => Tab(text: tab)).toList(),
-              onTap: (index) => setState(() => _selectedTab = _tabs[index]),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: SizedBox(
+              height: 36,
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: _discoveryTabs.length,
+                itemBuilder: (context, index) {
+                  final tab = _discoveryTabs[index];
+                  final selected = _discoveryTab == tab;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: FilterChip(
+                      label: Text(tab),
+                      selected: selected,
+                      onSelected: (_) => setState(() => _discoveryTab = tab),
+                      backgroundColor: RippleColors.surfaceVariant,
+                      selectedColor: RippleColors.primary.withValues(alpha: 0.2),
+                      labelStyle: TextStyle(
+                        color: selected ? RippleColors.primary : RippleColors.textSecondary,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                        side: BorderSide(
+                          color: selected ? RippleColors.primary : RippleColors.border,
+                          width: selected ? 1.5 : 0.5,
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
             ),
           ),
 
-          // Search results
+          // Results / discovery body
           Expanded(
-            child: _isSearching
-                ? Center(child: CircularProgressIndicator(color: RippleColors.primary))
-                : _searchController.text.isEmpty
-                    ? _buildRecentSearches()
-                    : _buildSearchResults(),
+            child: _searchController.text.isEmpty
+                ? _buildDiscoveryView()
+                : (_discoveryTab == 'For You'
+                    ? _buildSearchResults()
+                    : _buildDiscoveryResults()),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildRecentSearches() {
-    // In a real app, this would show recent searches from local storage
+  /// "For You" discovery view: suggested accounts, trending, recent searches.
+  Widget _buildDiscoveryView() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Suggested accounts
+          if (_suggested.isNotEmpty) ...[
+            _buildSectionHeader('Suggested for you'),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 100,
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: _suggested.length,
+                itemBuilder: (context, index) => _buildSuggestedAccountChip(_suggested[index]),
+              ),
+            ),
+            const SizedBox(height: 28),
+          ],
+
+          // Trending posts
+          if (_trending.isNotEmpty) ...[
+            _buildSectionHeader('Trending'),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 260,
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: _trending.length,
+                itemBuilder: (context, index) => _buildTrendingPostCard(_trending[index]),
+              ),
+            ),
+            const SizedBox(height: 28),
+          ],
+
+          // Recent searches
+          if (_recentSearches.isNotEmpty) ...[
+            _buildSectionHeader('Recent searches'),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _recentSearches.map((recent) {
+                return ActionChip(
+                  label: Text(recent),
+                  onPressed: () {
+                    _searchController.text = recent;
+                    _searchController.selection = TextSelection(
+                      baseOffset: 0,
+                      extentOffset: recent.length,
+                    );
+                    _focusNode.requestFocus();
+                    final trimmed = recent.trim();
+                    if (_discoveryTab == 'For You') {
+                      _search(trimmed);
+                    } else {
+                      _searchDiscovery(trimmed);
+                    }
+                  },
+                  avatar: const Icon(Icons.history, size: 16),
+                  onDeleted: () {
+                    setState(() => _recentSearches.remove(recent));
+                  },
+                );
+              }).toList(),
+            ),
+            if (_recentSearches.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: _clearRecentSearches,
+                  child: const Text('Clear all'),
+                ),
+              ),
+            ],
+          ],
+
+          if (_suggested.isEmpty && _trending.isEmpty && _recentSearches.isEmpty)
+            _buildEmptyDiscovery(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyDiscovery() {
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -274,14 +507,14 @@ class _SearchScreenState extends State<SearchScreen> {
           ),
           const SizedBox(height: 16),
           Text(
-            'Search for people, posts, and reels',
+            'Discover people, posts, and reels',
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
               color: RippleColors.textSecondary,
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            'Posts, accounts, and reels from the community',
+            'Search by username, hashtag, location, or audio.',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               color: RippleColors.textTertiary,
             ),
@@ -291,11 +524,187 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
+  /// Suggested account shown as a horizontal chip with a follow button.
+  Widget _buildSuggestedAccountChip(Map<String, dynamic> user) {
+    final username = user['username'] as String? ?? 'Unknown';
+    final displayName = user['display_name'] as String? ?? username;
+    final avatarUrl = user['avatar_url'] as String?;
+    final id = user['id'] as String?;
+    final optimistic = user['_optimisticFollowing'] as bool? ?? false;
+    final following = optimistic || _followingIds.contains(id);
+
+    return SizedBox(
+      width: 120,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          GestureDetector(
+            onTap: () => context.go('/user/$username'),
+            child: Column(
+              children: [
+                CircleAvatar(
+                  radius: 30,
+                  backgroundColor: RippleColors.surfaceVariant,
+                  backgroundImage: avatarUrl != null
+                      ? CachedNetworkImageProvider(avatarUrl)
+                      : null,
+                  child: avatarUrl == null
+                      ? Text(
+                          username[0].toUpperCase(),
+                          style: const TextStyle(
+                            color: RippleColors.textPrimary,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                          ),
+                        )
+                      : null,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  displayName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: RippleColors.textPrimary,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
+                ),
+                Text(
+                  '@$username',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: RippleColors.textSecondary,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 6),
+          if (id != null)
+            TextButton(
+              onPressed: () => _toggleFollow(user),
+              style: TextButton.styleFrom(
+                padding: EdgeInsets.zero,
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: Text(
+                following ? 'Following' : 'Follow',
+                style: TextStyle(
+                  color: following ? RippleColors.textSecondary : RippleColors.primary,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 11,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Trending post shown as a horizontal card in the discovery view.
+  Widget _buildTrendingPostCard(Map<String, dynamic> post) {
+    final media = post['media'] as List<dynamic>?;
+    final mediaUrl = (media != null && media.isNotEmpty)
+        ? (media.first as Map)['url'] as String?
+        : null;
+    final profile = post['profiles'] as Map<String, dynamic>?;
+    final username = profile != null
+        ? (profile['username'] as String? ?? 'Unknown')
+        : 'Unknown';
+    final likesCount = (post['likes'] as Map?)?['count'] as int? ?? 0;
+    final postId = post['id'] as String?;
+
+    return GestureDetector(
+      onTap: postId != null
+          ? () => context.go('${RippleConstants.routeFeed}/post/$postId')
+          : null,
+      child: Container(
+        width: 150,
+        margin: const EdgeInsets.only(right: 12),
+        decoration: BoxDecoration(
+          color: RippleColors.surfaceVariant,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (mediaUrl != null)
+              ClipRRect(
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+                child: CachedNetworkImage(
+                  imageUrl: mediaUrl,
+                  height: 140,
+                  width: 150,
+                  fit: BoxFit.cover,
+                  placeholder: (context, url) => Container(
+                    color: RippleColors.surfaceVariant,
+                  ),
+                  errorWidget: (context, url, error) => Container(
+                    color: RippleColors.surfaceVariant,
+                    child: SvgPicture.asset(
+                      'assets/icons/photo_library.svg',
+                      width: 32,
+                      height: 32,
+                      colorFilter: ColorFilter.mode(
+                        RippleColors.textTertiary,
+                        BlendMode.srcIn,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '@$username',
+                    style: TextStyle(
+                      color: RippleColors.textSecondary,
+                      fontSize: 11,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.favorite,
+                        size: 14,
+                        color: RippleColors.textSecondary,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        '$likesCount',
+                        style: TextStyle(
+                          color: RippleColors.textSecondary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Standard search results (users / posts / reels) for the "For You" tab.
   Widget _buildSearchResults() {
-    final usersVisible = _selectedTab != 'Reels' && _users.isNotEmpty;
-    final postsVisible = _selectedTab != 'Reels' && _selectedTab != 'Accounts' && _posts.isNotEmpty;
-    final reelsVisible = _selectedTab != 'Accounts' && _reels.isNotEmpty;
-    if (!usersVisible && !postsVisible && !reelsVisible) {
+    final usersVisible = _resultsTab != 'Reels' && _users.isNotEmpty;
+    final postsVisible = _resultsTab != 'Reels' && _resultsTab != 'Accounts' && _posts.isNotEmpty;
+    final reelsVisible = _resultsTab != 'Accounts' && _reels.isNotEmpty;
+
+    if (!usersVisible && !postsVisible && !reelsVisible && _isSearching == false) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -330,8 +739,44 @@ class _SearchScreenState extends State<SearchScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Results tabs
+          SizedBox(
+            height: 36,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              itemCount: _resultsTabs.length,
+              itemBuilder: (context, index) {
+                final tab = _resultsTabs[index];
+                final selected = _resultsTab == tab;
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: FilterChip(
+                    label: Text(tab),
+                    selected: selected,
+                    onSelected: (_) => setState(() => _resultsTab = tab),
+                    backgroundColor: RippleColors.surfaceVariant,
+                    selectedColor: RippleColors.primary.withValues(alpha: 0.2),
+                    labelStyle: TextStyle(
+                      color: selected ? RippleColors.primary : RippleColors.textSecondary,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(18),
+                      side: BorderSide(
+                        color: selected ? RippleColors.primary : RippleColors.border,
+                        width: selected ? 1.5 : 0.5,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 16),
+
           // Users
-          if (_selectedTab != 'Reels' && _users.isNotEmpty) ...[
+          if (usersVisible) ...[
             _buildSectionHeader('Accounts'),
             const SizedBox(height: 12),
             ListView.builder(
@@ -344,7 +789,7 @@ class _SearchScreenState extends State<SearchScreen> {
           ],
 
           // Posts
-          if (_selectedTab != 'Reels' && _selectedTab != 'Accounts' && _posts.isNotEmpty) ...[
+          if (postsVisible) ...[
             _buildSectionHeader('Posts'),
             const SizedBox(height: 12),
             GridView.builder(
@@ -363,7 +808,7 @@ class _SearchScreenState extends State<SearchScreen> {
           ],
 
           // Reels
-          if (_selectedTab != 'Accounts' && _reels.isNotEmpty) ...[
+          if (reelsVisible) ...[
             _buildSectionHeader('Reels'),
             const SizedBox(height: 12),
             GridView.builder(
@@ -373,10 +818,113 @@ class _SearchScreenState extends State<SearchScreen> {
                 crossAxisCount: 3,
                 crossAxisSpacing: 2,
                 mainAxisSpacing: 2,
-                childAspectRatio: 9/16,
+                childAspectRatio: 9 / 16,
               ),
               itemCount: _reels.length,
               itemBuilder: (context, index) => _buildReelGridItem(_reels[index]),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Discovery results (hashtag / location / audio posts/reels).
+  Widget _buildDiscoveryResults() {
+    final hasResults = _hashtagPosts.isNotEmpty ||
+        _locationPosts.isNotEmpty ||
+        _audioReels.isNotEmpty;
+
+    if (!hasResults && _isSearching == false) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SvgPicture.asset(
+              'assets/icons/search_off.svg',
+              width: 64,
+              height: 64,
+              colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'No ${_discoveryTab.toLowerCase()} results found',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                color: RippleColors.textSecondary,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Try a different keyword',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: RippleColors.textTertiary,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: () async {
+        final query = _searchController.text.trim();
+        if (query.length >= 2) await _searchDiscovery(query);
+      },
+      color: RippleColors.primary,
+      backgroundColor: RippleColors.surface,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          if (_discoveryTab == 'Hashtags' && _hashtagPosts.isNotEmpty) ...[
+            _buildSectionHeader('#${_searchController.text.trim()} posts'),
+            const SizedBox(height: 12),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 2,
+                mainAxisSpacing: 2,
+                childAspectRatio: 1,
+              ),
+              itemCount: _hashtagPosts.length,
+              itemBuilder: (context, index) =>
+                  _buildDiscoveryPostGridItem(_hashtagPosts[index]),
+            ),
+            const SizedBox(height: 24),
+          ],
+          if (_discoveryTab == 'Locations' && _locationPosts.isNotEmpty) ...[
+            _buildSectionHeader('${_searchController.text.trim()} posts'),
+            const SizedBox(height: 12),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 2,
+                mainAxisSpacing: 2,
+                childAspectRatio: 1,
+              ),
+              itemCount: _locationPosts.length,
+              itemBuilder: (context, index) =>
+                  _buildDiscoveryPostGridItem(_locationPosts[index]),
+            ),
+            const SizedBox(height: 24),
+          ],
+          if (_discoveryTab == 'Audio' && _audioReels.isNotEmpty) ...[
+            _buildSectionHeader('${_searchController.text.trim()} reels'),
+            const SizedBox(height: 12),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 2,
+                mainAxisSpacing: 2,
+                childAspectRatio: 9 / 16,
+              ),
+              itemCount: _audioReels.length,
+              itemBuilder: (context, index) => _buildReelGridItem(_audioReels[index]),
             ),
           ],
         ],
@@ -405,7 +953,11 @@ class _SearchScreenState extends State<SearchScreen> {
         child: user['avatar_url'] == null
             ? Text(
                 user['username']?[0]?.toUpperCase() ?? '?',
-                style: const TextStyle(color: RippleColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 14),
+                style: const TextStyle(
+                  color: RippleColors.textPrimary,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 14,
+                ),
               )
             : null,
       ),
@@ -438,8 +990,11 @@ class _SearchScreenState extends State<SearchScreen> {
     final mediaUrl = media.first['url'] as String?;
     if (mediaUrl == null) return const SizedBox.shrink();
 
+    final postId = post['id'] as String?;
     return GestureDetector(
-      onTap: () => context.go('${RippleConstants.routeFeed}/post/${post['id']}'),
+      onTap: postId != null
+          ? () => context.go('${RippleConstants.routeFeed}/post/$postId')
+          : null,
       child: CachedNetworkImage(
         imageUrl: mediaUrl,
         fit: BoxFit.cover,
@@ -455,12 +1010,19 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
+  Widget _buildDiscoveryPostGridItem(Map<String, dynamic> post) {
+    return _buildPostGridItem(post);
+  }
+
   Widget _buildReelGridItem(Map<String, dynamic> reel) {
     final thumbnailUrl = reel['thumbnail_url'] as String?;
     final videoUrl = reel['video_url'] as String?;
+    final reelId = reel['id'] as String?;
 
     return GestureDetector(
-      onTap: () => context.go('${RippleConstants.routeReels}/reel/${reel['id']}'),
+      onTap: reelId != null
+          ? () => context.go('${RippleConstants.routeReels}/reel/$reelId')
+          : null,
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -477,8 +1039,6 @@ class _SearchScreenState extends State<SearchScreen> {
                 ),
               ),
             )
-          else if (videoUrl != null)
-            Container(color: RippleColors.surfaceVariant)
           else
             Container(color: RippleColors.surfaceVariant),
           Positioned(

@@ -1205,4 +1205,110 @@ class SupabaseService {
         .maybeSingle();
     return response?['user_id'] as String?;
   }
+
+  // ---------------------------------------------------------------------------
+  // Discovery & Creators — search / suggested / trending
+  // ---------------------------------------------------------------------------
+
+  /// Search posts by hashtag. Matches captions containing `#$hashtag`.
+  Future<List<Map<String, dynamic>>> searchByHashtag(String hashtag) async {
+    final clean = hashtag.trim().replaceFirst(RegExp(r'^#'), '');
+    final response = await client
+        .from(RippleConstants.tablePosts)
+        .select('''
+          *,
+          profiles:user_id (id, username, display_name, avatar_url),
+          likes:post_likes (count),
+          comments:post_comments (count)
+        ''')
+        .ilike('caption', '%#$clean%')
+        .order('created_at', ascending: false)
+        .limit(50);
+    return List<Map<String, dynamic>>.from(response);
+  }
+
+  /// Search posts by location. Matches the post's `location` field.
+  Future<List<Map<String, dynamic>>> searchByLocation(String location) async {
+    final response = await client
+        .from(RippleConstants.tablePosts)
+        .select('''
+          *,
+          profiles:user_id (id, username, display_name, avatar_url),
+          likes:post_likes (count),
+          comments:post_comments (count)
+        ''')
+        .ilike('location', '%$location%')
+        .order('created_at', ascending: false)
+        .limit(50);
+    return List<Map<String, dynamic>>.from(response);
+  }
+
+  /// Search reels by audio (music title or artist).
+  Future<List<Map<String, dynamic>>> searchReelsByAudio(String query) async {
+    final response = await client
+        .from(RippleConstants.tableReels)
+        .select('''
+          *,
+          profiles:user_id (id, username, display_name, avatar_url),
+          likes:reel_likes (count),
+          comments:reel_comments (count)
+        ''')
+        .or('music_title.ilike.%$query%,music_artist.ilike.%$query%')
+        .order('created_at', ascending: false)
+        .limit(50);
+    return List<Map<String, dynamic>>.from(response);
+  }
+
+  /// Suggested accounts: profiles the current user doesn't follow yet,
+  /// ordered by follower count (popular first). Excludes the current user.
+  Future<List<Map<String, dynamic>>> getSuggestedAccounts({int limit = 20}) async {
+    final currentUserId = currentUser?.id;
+    if (currentUserId == null) return [];
+
+    final followsResponse = await client
+        .from(RippleConstants.tableFollows)
+        .select('following_id')
+        .eq('follower_id', currentUserId);
+    final followedIds = <String>{};
+    for (final row in (followsResponse as List)) {
+      final id = row['following_id'] as String?;
+      if (id != null) followedIds.add(id);
+    }
+    followedIds.add(currentUserId);
+
+    final profilesResponse = await client
+        .from(RippleConstants.tableProfiles)
+        .select('id, username, display_name, avatar_url, followers_count, bio')
+        .order('followers_count', ascending: false)
+        .limit(limit * 3);
+
+    final candidates = List<Map<String, dynamic>>.from(profilesResponse);
+    final suggested = candidates
+        .where((p) => !followedIds.contains(p['id'] as String?))
+        .take(limit)
+        .toList();
+    return suggested;
+  }
+
+  /// Trending posts: recent posts ranked by like count (most liked first).
+  Future<List<Map<String, dynamic>>> getTrendingPosts({int limit = 20}) async {
+    final response = await client
+        .from(RippleConstants.tablePosts)
+        .select('''
+          *,
+          profiles:user_id (id, username, display_name, avatar_url),
+          likes:post_likes (count),
+          comments:post_comments (count)
+        ''')
+        .order('created_at', ascending: false)
+        .limit(100);
+
+    final posts = List<Map<String, dynamic>>.from(response);
+    posts.sort((a, b) {
+      final aLikes = (a['likes'] as Map?)?['count'] as int? ?? 0;
+      final bLikes = (b['likes'] as Map?)?['count'] as int? ?? 0;
+      return bLikes.compareTo(aLikes);
+    });
+    return posts.take(limit).toList();
+  }
 }
