@@ -66,6 +66,8 @@ class RippleConstants {
   static const String tableReelCommentReactions = 'reel_comment_reactions';
   static const String tablePostReposts = 'post_reposts';
   static const String tableReelReposts = 'reel_reposts';
+  static const String tableBlockedAccounts = 'blocked_accounts';
+  static const String tableRestrictedAccounts = 'restricted_accounts';
 
   // Post types
   static const String postTypeImage = 'image';

@@ -1311,4 +1311,148 @@ class SupabaseService {
     });
     return posts.take(limit).toList();
   }
+
+  // ---------------------------------------------------------------------------
+  // Privacy & Safety — private account, blocked / restricted accounts
+  // ---------------------------------------------------------------------------
+
+  /// Toggle the current user's private account setting.
+  ///
+  /// When private, new followers must be approved before they can follow.
+  /// Returns the new `is_private` value.
+  Future<bool> togglePrivateAccount(bool isPrivate) async {
+    final currentUserId = currentUser!.id;
+    await client
+        .from(RippleConstants.tableProfiles)
+        .update({'is_private': isPrivate})
+        .eq('id', currentUserId);
+    return isPrivate;
+  }
+
+  /// Whether the current user's account is private.
+  Future<bool> isPrivateAccount() async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tableProfiles)
+        .select('is_private')
+        .eq('id', currentUserId)
+        .maybeSingle();
+    return response?['is_private'] == true;
+  }
+
+  /// Block a user. Removes any existing follow relationship in both directions.
+  Future<void> blockUser(String targetUserId) async {
+    final currentUserId = currentUser!.id;
+    if (currentUserId == targetUserId) return;
+
+    await client.from(RippleConstants.tableBlockedAccounts).upsert({
+      'blocker_id': currentUserId,
+      'blocked_id': targetUserId,
+      'created_at': DateTime.now().toIso8601String(),
+    }, onConflict: 'blocker_id, blocked_id');
+
+    // Remove mutual follows
+    await client
+        .from(RippleConstants.tableFollows)
+        .delete()
+        .eq('follower_id', currentUserId)
+        .eq('following_id', targetUserId);
+    await client
+        .from(RippleConstants.tableFollows)
+        .delete()
+        .eq('follower_id', targetUserId)
+        .eq('following_id', currentUserId);
+  }
+
+  /// Unblock a user.
+  Future<void> unblockUser(String targetUserId) async {
+    final currentUserId = currentUser!.id;
+    await client
+        .from(RippleConstants.tableBlockedAccounts)
+        .delete()
+        .eq('blocker_id', currentUserId)
+        .eq('blocked_id', targetUserId);
+  }
+
+  /// List of accounts the current user has blocked.
+  Future<List<Map<String, dynamic>>> getBlockedAccounts() async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tableBlockedAccounts)
+        .select('''
+          blocked_id,
+          created_at,
+          blocked:profiles!blocked_accounts_blocked_id_fkey (
+            id, username, display_name, avatar_url
+          )
+        ''')
+        .eq('blocker_id', currentUserId)
+        .order('created_at', ascending: false);
+
+    return List<Map<String, dynamic>>.from(response);
+  }
+
+  /// Restrict a user. Their comments and messages are limited.
+  Future<void> restrictUser(String targetUserId) async {
+    final currentUserId = currentUser!.id;
+    if (currentUserId == targetUserId) return;
+
+    await client.from(RippleConstants.tableRestrictedAccounts).upsert({
+      'restricter_id': currentUserId,
+      'restricted_id': targetUserId,
+      'created_at': DateTime.now().toIso8601String(),
+    }, onConflict: 'restricter_id, restricted_id');
+  }
+
+  /// Unrestrict a user.
+  Future<void> unrestrictUser(String targetUserId) async {
+    final currentUserId = currentUser!.id;
+    await client
+        .from(RippleConstants.tableRestrictedAccounts)
+        .delete()
+        .eq('restricter_id', currentUserId)
+        .eq('restricted_id', targetUserId);
+  }
+
+  /// List of accounts the current user has restricted.
+  Future<List<Map<String, dynamic>>> getRestrictedAccounts() async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tableRestrictedAccounts)
+        .select('''
+          restricted_id,
+          created_at,
+          restricted:profiles!restricted_accounts_restricted_id_fkey (
+            id, username, display_name, avatar_url
+          )
+        ''')
+        .eq('restricter_id', currentUserId)
+        .order('created_at', ascending: false);
+
+    return List<Map<String, dynamic>>.from(response);
+  }
+
+  /// Whether the current user has blocked a given account.
+  Future<bool> isBlocked(String targetUserId) async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tableBlockedAccounts)
+        .select('id')
+        .eq('blocker_id', currentUserId)
+        .eq('blocked_id', targetUserId)
+        .maybeSingle();
+    return response != null;
+  }
+
+  /// Whether the current user has restricted a given account.
+  Future<bool> isRestricted(String targetUserId) async {
+    final currentUserId = currentUser!.id;
+    final response = await client
+        .from(RippleConstants.tableRestrictedAccounts)
+        .select('id')
+        .eq('restricter_id', currentUserId)
+        .eq('restricted_id', targetUserId)
+        .maybeSingle();
+    return response != null;
+  }
 }

@@ -16,11 +16,14 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   Map<String, dynamic>? _profile;
   bool _isLoading = true;
+  bool _isPrivate = false;
+  bool _isLoadingPrivate = false;
 
   @override
   void initState() {
     super.initState();
     _loadProfile();
+    _loadPrivateStatus();
   }
 
   Future<void> _loadProfile() async {
@@ -38,6 +41,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _loadPrivateStatus() async {
+    try {
+      final isPrivate = await SupabaseService().isPrivateAccount();
+      if (mounted) {
+        setState(() {
+          _isPrivate = isPrivate;
+          _isLoadingPrivate = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isLoadingPrivate = false);
+    }
+  }
+
+  Future<void> _togglePrivateAccount() async {
+    setState(() => _isLoadingPrivate = true);
+    try {
+      final newValue = await SupabaseService().togglePrivateAccount(_isPrivate);
+      if (mounted) {
+        setState(() {
+          _isPrivate = newValue;
+          _isLoadingPrivate = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _isLoadingPrivate = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Failed to update privacy setting'),
+            backgroundColor: RippleColors.error,
+          ),
+        );
       }
     }
   }
@@ -64,6 +104,79 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       : 'Change name, username, bio, photo',
                   onTap: () => context.go(RippleConstants.routeEditProfile),
                 ),
+                _SettingsSwitchTile(
+                  iconAsset: 'assets/icons/lock.svg',
+                  title: 'Private Account',
+                  subtitle: 'Only approved followers can see your posts and reels',
+                  value: _isPrivate,
+                  loading: _isLoadingPrivate,
+                  onChanged: (_) => _togglePrivateAccount(),
+                ),
+                _SettingsTile(
+                  iconAsset: 'assets/icons/article.svg',
+                  title: 'Download Your Data',
+                  subtitle: 'Request a copy of your posts, reels, and messages',
+                  onTap: () => _showComingSoon('Download Your Data'),
+                ),
+                _SettingsTile(
+                  iconAsset: 'assets/icons/delete.svg',
+                  title: 'Deactivate Account',
+                  subtitle: 'Temporarily disable your account',
+                  onTap: () => _showComingSoon('Deactivate Account'),
+                  destructive: true,
+                ),
+                _SettingsTile(
+                  iconAsset: 'assets/icons/delete.svg',
+                  title: 'Delete Account',
+                  subtitle: 'Permanently delete your account and data',
+                  onTap: () => _showComingSoon('Delete Account'),
+                  destructive: true,
+                ),
+
+                const SizedBox(height: 24),
+                // Privacy & Safety
+                _buildSectionHeader('Privacy & Safety'),
+                _SettingsTile(
+                  iconAsset: 'assets/icons/block.svg',
+                  title: 'Blocked Accounts',
+                  subtitle: 'Accounts you have blocked',
+                  onTap: () => _showComingSoon('Blocked Accounts'),
+                ),
+                _SettingsTile(
+                  iconAsset: 'assets/icons/person_remove.svg',
+                  title: 'Restricted Accounts',
+                  subtitle: 'Accounts you have restricted',
+                  onTap: () => _showComingSoon('Restricted Accounts'),
+                ),
+                _SettingsTile(
+                  iconAsset: 'assets/icons/privacy.svg',
+                  title: 'Hidden Words',
+                  subtitle: 'Filter comments and messages containing certain words',
+                  onTap: () => _showComingSoon('Hidden Words'),
+                ),
+                _SettingsTile(
+                  iconAsset: 'assets/icons/mute.svg',
+                  title: 'Comment Filters',
+                  subtitle: 'Control who can comment on your posts and reels',
+                  onTap: () => _showComingSoon('Comment Filters'),
+                ),
+
+                const SizedBox(height: 24),
+                // Notifications
+                _buildSectionHeader('Notifications'),
+                _SettingsTile(
+                  iconAsset: 'assets/icons/notification.svg',
+                  title: 'Push Notifications',
+                  subtitle: 'Receive push notifications for likes, comments, and follows',
+                  onTap: () => _showComingSoon('Push Notifications'),
+                ),
+                _SettingsTile(
+                  iconAsset: 'assets/icons/notification.svg',
+                  title: 'Notification Preferences',
+                  subtitle: 'Choose which notifications you receive',
+                  onTap: () => _showComingSoon('Notification Preferences'),
+                ),
+
                 const SizedBox(height: 24),
                 // App
                 _buildSectionHeader('App'),
@@ -125,12 +238,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _buildSectionHeader(String title) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.only(bottom: 8, top: 12),
       child: Text(
         title,
         style: Theme.of(context).textTheme.labelLarge?.copyWith(
           color: RippleColors.textSecondary,
         ),
+      ),
+    );
+  }
+
+  void _showComingSoon(String feature) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('$feature is coming soon.'),
+        backgroundColor: RippleColors.surfaceElevated,
+        behavior: SnackBarBehavior.floating,
       ),
     );
   }
@@ -150,7 +273,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           child: Text(
             RippleConstants.appName,
             style: const TextStyle(
-                            fontSize: 36,
+              fontSize: 36,
               fontWeight: FontWeight.w400,
               color: Colors.white,
             ),
@@ -241,17 +364,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
+/// Settings row with an icon, title, subtitle, and chevron.
 class _SettingsTile extends StatelessWidget {
   final String iconAsset;
   final String title;
   final String subtitle;
   final VoidCallback onTap;
+  final bool destructive;
 
   const _SettingsTile({
     required this.iconAsset,
     required this.title,
     required this.subtitle,
     required this.onTap,
+    this.destructive = false,
   });
 
   @override
@@ -260,6 +386,85 @@ class _SettingsTile extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
+        borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: RippleColors.divider, width: 0.5),
+            ),
+          ),
+          child: Row(
+            children: [
+              SvgPicture.asset(
+                iconAsset,
+                width: 24,
+                height: 24,
+                colorFilter: ColorFilter.mode(
+                  destructive ? RippleColors.error : RippleColors.textSecondary,
+                  BlendMode.srcIn,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w500,
+                        color: destructive ? RippleColors.error : null,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: RippleColors.textTertiary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              SvgPicture.asset(
+                'assets/icons/chevron_right.svg',
+                width: 20,
+                height: 20,
+                colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Settings row with a switch (e.g. Private Account toggle).
+class _SettingsSwitchTile extends StatelessWidget {
+  final String iconAsset;
+  final String title;
+  final String subtitle;
+  final bool value;
+  final bool loading;
+  final ValueChanged<bool> onChanged;
+
+  const _SettingsSwitchTile({
+    required this.iconAsset,
+    required this.title,
+    required this.subtitle,
+    required this.value,
+    required this.loading,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: loading ? null : () => onChanged(!value),
         borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
@@ -297,12 +502,22 @@ class _SettingsTile extends StatelessWidget {
                   ],
                 ),
               ),
-              SvgPicture.asset(
-                'assets/icons/chevron_right.svg',
-                width: 20,
-                height: 20,
-                colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
-              ),
+              if (loading)
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation(RippleColors.textSecondary),
+                  ),
+                )
+              else
+                Switch(
+                  value: value,
+                  onChanged: loading ? null : onChanged,
+                  activeColor: RippleColors.primary,
+                  activeTrackColor: RippleColors.primary.withValues(alpha: 0.3),
+                ),
             ],
           ),
         ),
