@@ -299,7 +299,7 @@ class AnimatedEmojiText extends StatelessWidget {
       caseSensitive: false,
     );
 
-    final spans = <TextSpan>[];
+    final spans = <InlineSpan>[];
     var lastIndex = 0;
 
     for (final match in emojiRegex.allMatches(data)) {
