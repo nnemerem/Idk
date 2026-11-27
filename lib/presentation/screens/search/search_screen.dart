@@ -374,7 +374,6 @@ class _SearchScreenState extends State<SearchScreen> {
                       selected: selected,
                       onSelected: (_) => setState(() => _discoveryTab = tab),
                       backgroundColor: RippleColors.surfaceVariant,
-                      selectedColor: RippleColors.primary.withValues(alpha: 0.2),
                       labelStyle: TextStyle(
                         color: selected ? RippleColors.primary : RippleColors.textSecondary,
                         fontWeight: FontWeight.w600,
@@ -755,7 +754,6 @@ class _SearchScreenState extends State<SearchScreen> {
                     selected: selected,
                     onSelected: (_) => setState(() => _resultsTab = tab),
                     backgroundColor: RippleColors.surfaceVariant,
-                    selectedColor: RippleColors.primary.withValues(alpha: 0.2),
                     labelStyle: TextStyle(
                       color: selected ? RippleColors.primary : RippleColors.textSecondary,
                       fontWeight: FontWeight.w600,
