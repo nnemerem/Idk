@@ -447,7 +447,7 @@ class _SearchScreenState extends State<SearchScreen> {
               spacing: 8,
               runSpacing: 8,
               children: _recentSearches.map((recent) {
-                return Chip(
+                return ActionChip(
                   label: Text(recent),
                   onPressed: () {
                     _searchController.text = recent;
@@ -464,10 +464,6 @@ class _SearchScreenState extends State<SearchScreen> {
                     }
                   },
                   avatar: const Icon(Icons.history, size: 16),
-                  deleteIcon: const Icon(Icons.close, size: 16),
-                  onDeleted: () {
-                    setState(() => _recentSearches.remove(recent));
-                  },
                 );
               }).toList(),
             ),
