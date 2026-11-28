@@ -192,21 +192,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (GuestMode.isGuestMode)
                   SizedBox(
                     width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: () {
-                        GuestMode.exitGuestMode(context);
-                      },
-                      icon: SvgPicture.asset('assets/icons/person_add.svg', width: 20, height: 20),
-                      label: const Text(
-                        'Switch to Real Account',
-                        style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: RippleColors.primary,
-                        side: BorderSide(color: RippleColors.primary, width: 1),
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
+                    child: Semantics(
+                      label: 'Switch to Real Account',
+                      hint: 'Double tap to exit guest mode and sign in.',
+                      button: true,
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          GuestMode.exitGuestMode(context);
+                        },
+                        icon: SvgPicture.asset('assets/icons/person_add.svg', width: 20, height: 20),
+                        label: const Text(
+                          'Switch to Real Account',
+                          style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: RippleColors.primary,
+                          side: BorderSide(color: RippleColors.primary, width: 1),
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
+                          ),
                         ),
                       ),
                     ),
@@ -215,19 +220,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (!GuestMode.isGuestMode)
                   SizedBox(
                     width: double.infinity,
-                    child: OutlinedButton(
-                      onPressed: _showLogoutConfirmation,
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: RippleColors.error,
-                        side: BorderSide(color: RippleColors.error, width: 1),
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
+                    child: Semantics(
+                      label: 'Log Out',
+                      hint: 'Double tap to sign out of your account.',
+                      button: true,
+                      child: OutlinedButton(
+                        onPressed: _showLogoutConfirmation,
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: RippleColors.error,
+                          side: BorderSide(color: RippleColors.error, width: 1),
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(RippleConstants.borderRadiusLarge),
+                          ),
                         ),
-                      ),
-                      child: const Text(
-                        'Log Out',
-                        style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+                        child: const Text(
+                          'Log Out',
+                          style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+                        ),
                       ),
                     ),
                   ),
@@ -384,56 +394,62 @@ class _SettingsTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: RippleColors.divider, width: 0.5),
+      child: Semantics(
+        container: true,
+        label: '$title. $subtitle',
+        hint: destructive ? 'Double tap to $title. This action cannot be undone.' : 'Double tap to $title.',
+        button: true,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: RippleColors.divider, width: 0.5),
+              ),
             ),
-          ),
-          child: Row(
-            children: [
-              SvgPicture.asset(
-                iconAsset,
-                width: 24,
-                height: 24,
-                colorFilter: ColorFilter.mode(
-                  destructive ? RippleColors.error : RippleColors.textSecondary,
-                  BlendMode.srcIn,
+            child: Row(
+              children: [
+                SvgPicture.asset(
+                  iconAsset,
+                  width: 24,
+                  height: 24,
+                  colorFilter: ColorFilter.mode(
+                    destructive ? RippleColors.error : RippleColors.textSecondary,
+                    BlendMode.srcIn,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w500,
-                        color: destructive ? RippleColors.error : null,
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w500,
+                          color: destructive ? RippleColors.error : null,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: RippleColors.textTertiary,
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: RippleColors.textTertiary,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-              SvgPicture.asset(
-                'assets/icons/chevron_right.svg',
-                width: 20,
-                height: 20,
-                colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
-              ),
-            ],
+                SvgPicture.asset(
+                  'assets/icons/chevron_right.svg',
+                  width: 20,
+                  height: 20,
+                  colorFilter: ColorFilter.mode(RippleColors.textTertiary, BlendMode.srcIn),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -463,62 +479,68 @@ class _SettingsSwitchTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: Colors.transparent,
-      child: InkWell(
-        onTap: loading ? null : () => onChanged(!value),
-        borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: RippleColors.divider, width: 0.5),
+      child: Semantics(
+        container: true,
+        label: '$title. $subtitle. Switch is currently ${value ? 'on' : 'off'}.',
+        hint: loading ? 'Switch is updating.' : 'Double tap to toggle $title.',
+        button: true,
+        child: InkWell(
+          onTap: loading ? null : () => onChanged(!value),
+          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: RippleColors.divider, width: 0.5),
+              ),
             ),
-          ),
-          child: Row(
-            children: [
-              SvgPicture.asset(
-                iconAsset,
-                width: 24,
-                height: 24,
-                colorFilter: ColorFilter.mode(RippleColors.textSecondary, BlendMode.srcIn),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: RippleColors.textTertiary,
-                      ),
-                    ),
-                  ],
+            child: Row(
+              children: [
+                SvgPicture.asset(
+                  iconAsset,
+                  width: 24,
+                  height: 24,
+                  colorFilter: ColorFilter.mode(RippleColors.textSecondary, BlendMode.srcIn),
                 ),
-              ),
-              if (loading)
-                const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation(RippleColors.textSecondary),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: RippleColors.textTertiary,
+                        ),
+                      ),
+                    ],
                   ),
-                )
-              else
-                Switch(
-                  value: value,
-                  onChanged: loading ? null : onChanged,
-                  activeColor: RippleColors.primary,
-                  activeTrackColor: RippleColors.primary.withValues(alpha: 0.3),
                 ),
-            ],
+                if (loading)
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation(RippleColors.textSecondary),
+                    ),
+                  )
+                else
+                  Switch(
+                    value: value,
+                    onChanged: loading ? null : onChanged,
+                    activeColor: RippleColors.primary,
+                    activeTrackColor: RippleColors.primary.withValues(alpha: 0.3),
+                  ),
+              ],
+            ),
           ),
         ),
       ),

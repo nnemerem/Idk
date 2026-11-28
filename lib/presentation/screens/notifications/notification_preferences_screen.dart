@@ -61,10 +61,15 @@ class _NotificationPreferencesScreenState
               ),
             )
           else
-            IconButton(
-              icon: const Icon(Icons.done_outlined),
-              tooltip: 'Save',
-              onPressed: _save,
+            Semantics(
+              label: 'Save notification preferences',
+              hint: 'Double tap to save your changes.',
+              button: true,
+              child: IconButton(
+                icon: const Icon(Icons.done_outlined),
+                tooltip: 'Save',
+                onPressed: _save,
+              ),
             ),
         ],
       ),
@@ -213,56 +218,62 @@ class _PreferenceTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: Colors.transparent,
-      child: InkWell(
-        onTap: () => onChanged(!value),
-        borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: RippleColors.divider, width: 0.5),
+      child: Semantics(
+        container: true,
+        label: '$title. $subtitle. Switch is currently ${value ? 'on' : 'off'}.',
+        hint: 'Double tap to toggle $title.',
+        button: true,
+        child: InkWell(
+          onTap: () => onChanged(!value),
+          borderRadius: BorderRadius.circular(RippleConstants.borderRadiusMedium),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: RippleColors.divider, width: 0.5),
+              ),
             ),
-          ),
-          child: Row(
-            children: [
-              SvgPicture.asset(
-                iconAsset,
-                width: 24,
-                height: 24,
-                colorFilter: ColorFilter.mode(
-                  value ? RippleColors.primary : RippleColors.textSecondary,
-                  BlendMode.srcIn,
+            child: Row(
+              children: [
+                SvgPicture.asset(
+                  iconAsset,
+                  width: 24,
+                  height: 24,
+                  colorFilter: ColorFilter.mode(
+                    value ? RippleColors.primary : RippleColors.textSecondary,
+                    BlendMode.srcIn,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                        color: RippleColors.textPrimary,
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: RippleColors.textPrimary,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: RippleColors.textSecondary,
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: RippleColors.textSecondary,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-              Switch(
-                value: value,
-                onChanged: onChanged,
-                activeColor: RippleColors.primary,
-                activeTrackColor: RippleColors.primary.withValues(alpha: 0.3),
-              ),
-            ],
+                Switch(
+                  value: value,
+                  onChanged: onChanged,
+                  activeColor: RippleColors.primary,
+                  activeTrackColor: RippleColors.primary.withValues(alpha: 0.3),
+                ),
+              ],
+            ),
           ),
         ),
       ),
