@@ -171,7 +171,6 @@ class _DeleteAccountScreenState extends State<DeleteAccountScreen> {
                             fontSize: 16,
                           ),
                         ),
-                  ),
                 ),
               ),
               const SizedBox(height: 12),

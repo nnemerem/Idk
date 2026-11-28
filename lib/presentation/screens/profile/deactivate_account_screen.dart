@@ -125,7 +125,6 @@ class _DeactivateAccountScreenState extends State<DeactivateAccountScreen> {
                             fontSize: 16,
                           ),
                         ),
-                  ),
                 ),
               ),
               const SizedBox(height: 12),
