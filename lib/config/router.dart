@@ -24,6 +24,8 @@ import 'package:ripple/presentation/screens/profile/edit_profile_screen.dart';
 import 'package:ripple/presentation/screens/profile/blocked_accounts_screen.dart';
 import 'package:ripple/presentation/screens/profile/restricted_accounts_screen.dart';
 import 'package:ripple/presentation/screens/notifications/notification_preferences_screen.dart';
+import 'package:ripple/presentation/screens/profile/deactivate_account_screen.dart';
+import 'package:ripple/presentation/screens/profile/delete_account_screen.dart';
 import 'package:ripple/presentation/components/ripple_bottom_nav.dart';
 import 'package:ripple/config/constants.dart';
 
@@ -168,6 +170,16 @@ final GoRouter appRouter = GoRouter(
                   name: 'notification-preferences',
                   builder: (context, state) =>
                       const NotificationPreferencesScreen(),
+                ),
+                GoRoute(
+                  path: 'deactivate-account',
+                  name: 'deactivate-account',
+                  builder: (context, state) => const DeactivateAccountScreen(),
+                ),
+                GoRoute(
+                  path: 'delete-account',
+                  name: 'delete-account',
+                  builder: (context, state) => const DeleteAccountScreen(),
                 ),
               ],
             ),

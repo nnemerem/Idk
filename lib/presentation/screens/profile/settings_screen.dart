@@ -122,14 +122,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   iconAsset: 'assets/icons/delete.svg',
                   title: 'Deactivate Account',
                   subtitle: 'Temporarily disable your account',
-                  onTap: () => _showComingSoon('Deactivate Account'),
+                  onTap: () => context.go(RippleConstants.routeDeactivateAccount),
                   destructive: true,
                 ),
                 _SettingsTile(
                   iconAsset: 'assets/icons/delete.svg',
                   title: 'Delete Account',
                   subtitle: 'Permanently delete your account and data',
-                  onTap: () => _showComingSoon('Delete Account'),
+                  onTap: () => context.go(RippleConstants.routeDeleteAccount),
                   destructive: true,
                 ),
 

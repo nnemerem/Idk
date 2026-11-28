@@ -41,6 +41,8 @@ class RippleConstants {
   static const String routeRestrictedAccounts = '/profile/restricted-accounts';
   static const String routeNotificationPreferences =
       '/profile/notification-preferences';
+  static const String routeDeactivateAccount = '/profile/deactivate-account';
+  static const String routeDeleteAccount = '/profile/delete-account';
 
   // Storage buckets
   static const String bucketAvatars = 'avatars';
