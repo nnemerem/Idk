@@ -23,6 +23,7 @@ import 'package:ripple/presentation/screens/profile/settings_screen.dart';
 import 'package:ripple/presentation/screens/profile/edit_profile_screen.dart';
 import 'package:ripple/presentation/screens/profile/blocked_accounts_screen.dart';
 import 'package:ripple/presentation/screens/profile/restricted_accounts_screen.dart';
+import 'package:ripple/presentation/screens/notifications/notification_preferences_screen.dart';
 import 'package:ripple/presentation/components/ripple_bottom_nav.dart';
 import 'package:ripple/config/constants.dart';
 
@@ -161,6 +162,12 @@ final GoRouter appRouter = GoRouter(
                   path: 'restricted-accounts',
                   name: 'restricted-accounts',
                   builder: (context, state) => const RestrictedAccountsScreen(),
+                ),
+                GoRoute(
+                  path: 'notification-preferences',
+                  name: 'notification-preferences',
+                  builder: (context, state) =>
+                      const NotificationPreferencesScreen(),
                 ),
               ],
             ),

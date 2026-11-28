@@ -168,13 +168,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   iconAsset: 'assets/icons/notification.svg',
                   title: 'Push Notifications',
                   subtitle: 'Receive push notifications for likes, comments, and follows',
-                  onTap: () => _showComingSoon('Push Notifications'),
+                  onTap: () => context.go(RippleConstants.routeNotificationPreferences),
                 ),
                 _SettingsTile(
                   iconAsset: 'assets/icons/notification.svg',
                   title: 'Notification Preferences',
                   subtitle: 'Choose which notifications you receive',
-                  onTap: () => _showComingSoon('Notification Preferences'),
+                  onTap: () => context.go(RippleConstants.routeNotificationPreferences),
                 ),
 
                 const SizedBox(height: 24),
